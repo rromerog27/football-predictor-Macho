@@ -25,6 +25,7 @@ from src import (
     prediction_model,
     report_generator,
     statistics,
+    ui_theme,
     visualizations,
 )
 from src.utils import MIN_MATCHES_FOR_ML_MODEL, MIN_MATCHES_RELIABLE, format_metric, format_pct, get_logger
@@ -38,34 +39,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
-    <style>
-    /* Oculta el botón "Deploy" y el pie de página "Made with Streamlit"
-    para que se vea más como una app propia. El menú hamburguesa (☰) se
-    deja visible a propósito: ahí vive el selector de tema Light/Dark. */
-    footer { visibility: hidden; }
-    [data-testid="stAppDeployButton"] { display: none; }
-    div[data-testid="stMetric"] {
-        background-color: rgba(46, 125, 50, 0.06);
-        border: 1px solid rgba(46, 125, 50, 0.15);
-        border-radius: 10px;
-        padding: 12px 14px 8px 14px;
-    }
-    .confidence-badge {
-        display: inline-block;
-        padding: 4px 14px;
-        border-radius: 999px;
-        font-weight: 600;
-        font-size: 0.9rem;
-    }
-    .confidence-alta { background-color: #E8F5E9; color: #1B5E20; }
-    .confidence-media { background-color: #FFF8E1; color: #E65100; }
-    .confidence-baja { background-color: #FFEBEE; color: #B71C1C; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown(ui_theme.inject_global_css(), unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -109,13 +83,17 @@ def _poisson_test_predictions_cached(train_df: pd.DataFrame, test_df: pd.DataFra
 
 
 def _load_uploaded_files(uploaded_files) -> list[data_loader.LoadedFile]:
+    """Debe llamarse dentro de un `with <container>:` (p. ej. el bloque
+    "Datos" de la barra lateral): usa `st.xxx` (no `st.sidebar.xxx`) para que
+    sus widgets respeten ese contenedor en vez de ir siempre al final de la
+    barra lateral."""
     loaded: list[data_loader.LoadedFile] = []
     for uploaded in uploaded_files:
         try:
             file_type = data_loader.detect_file_type(uploaded.name)
             if file_type == "excel":
                 sheet_names = data_loader.get_excel_sheet_names(uploaded)
-                chosen_sheet = st.sidebar.selectbox(
+                chosen_sheet = st.selectbox(
                     f"Hoja a analizar — {uploaded.name}",
                     sheet_names,
                     key=f"sheet_{uploaded.name}",
@@ -125,14 +103,14 @@ def _load_uploaded_files(uploaded_files) -> list[data_loader.LoadedFile]:
                 lf = data_loader.load_file(uploaded, uploaded.name)
             loaded.append(lf)
             if lf.dropped_odds_columns:
-                st.sidebar.caption(
+                st.caption(
                     f"'{uploaded.name}': se descartaron {len(lf.dropped_odds_columns)} "
                     "columnas de cuotas de apuestas."
                 )
             for w in lf.warnings:
-                st.sidebar.warning(f"'{uploaded.name}': {w}")
+                st.warning(f"'{uploaded.name}': {w}")
         except ValueError as exc:
-            st.sidebar.error(str(exc))
+            st.error(str(exc))
     return loaded
 
 
@@ -149,35 +127,38 @@ def render_inicio(
     cleaning_report: data_cleaner.CleaningReport,
     has_xg: bool,
 ) -> None:
-    st.title("⚽ Football Predictor")
     st.markdown(
-        "Aplicación local para analizar partidos de fútbol y generar predicciones "
-        "estadísticas (modelo de Poisson y, cuando hay datos suficientes, un modelo de "
-        "respaldo de regresión logística) a partir **únicamente** de los archivos que "
-        "cargues. No se usa ninguna fuente de datos externa."
+        ui_theme.render_topbar(
+            "Análisis estadístico y predicciones a partir únicamente de los archivos que cargues "
+            "— sin conexión a internet."
+        ),
+        unsafe_allow_html=True,
     )
+    st.write("")
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Archivos cargados", len(loaded_files))
-    col2.metric("Partidos con resultado", cleaning_report.final_historical_rows)
-    col3.metric("Partidos pendientes", cleaning_report.pending_rows)
+    quality_icon = "✅" if cleaning_report.sufficient_data else "⚠️"
+    quality_value = "Suficientes" if cleaning_report.sufficient_data else "Insuficientes"
+    quality_accent = "green" if cleaning_report.sufficient_data else "amber"
 
-    if cleaning_report.sufficient_data:
-        col4.markdown(
-            '<span class="confidence-badge confidence-alta">Datos suficientes</span>',
-            unsafe_allow_html=True,
-        )
-    else:
-        col4.markdown(
-            '<span class="confidence-badge confidence-baja">Datos insuficientes</span>',
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("---")
-    info_cols = st.columns(3)
-    info_cols[0].markdown(f"**Competición:** {competition_value or 'No identificada / múltiples'}")
-    info_cols[1].markdown(f"**Temporada(s) detectada(s):** {', '.join(season_labels) if season_labels else 'Desconocida'}")
-    info_cols[2].markdown(f"**xG en el archivo:** {'Disponible' if has_xg else 'xG no disponible (se usa solo goles reales)'}")
+    st.markdown(
+        ui_theme.stat_row(
+            [
+                {"icon": "📁", "label": "Archivos cargados", "value": len(loaded_files), "accent": "blue"},
+                {"icon": "✅", "label": "Partidos con resultado", "value": cleaning_report.final_historical_rows, "accent": "green"},
+                {"icon": "⏳", "label": "Partidos pendientes", "value": cleaning_report.pending_rows, "accent": "gray"},
+                {"icon": quality_icon, "label": "Calidad de datos", "value": quality_value, "accent": quality_accent},
+                {"icon": "🏆", "label": "Competición", "value": competition_value or "Múltiples", "accent": "blue"},
+                {
+                    "icon": "📅",
+                    "label": "Temporada(s)",
+                    "value": ", ".join(season_labels) if season_labels else "Desconocida",
+                    "accent": "green",
+                },
+            ]
+        ),
+        unsafe_allow_html=True,
+    )
+    st.caption(f"xG en el archivo: {'disponible' if has_xg else 'no disponible (se usa solo goles reales)'}.")
 
     if not cleaning_report.sufficient_data:
         st.warning(
@@ -307,6 +288,7 @@ def _team_metric_columns(container, profile: statistics.TeamProfile, stat_flags:
 
 def render_comparacion(historical_df: pd.DataFrame, home_team: str, away_team: str, recent_n: int) -> None:
     st.header("🆚 Comparación de equipos")
+    st.markdown(ui_theme.render_match_card(home_team, away_team), unsafe_allow_html=True)
 
     home_profile = statistics.build_team_profile(historical_df, home_team, recent_n)
     away_profile = statistics.build_team_profile(historical_df, away_team, recent_n)
@@ -495,6 +477,7 @@ def render_prediccion(
     season_label: str,
 ) -> None:
     st.header("🔮 Predicción principal")
+    st.markdown(ui_theme.render_match_card(home_team, away_team), unsafe_allow_html=True)
     st.caption(f"Modelo utilizado: {model_choice}")
 
     poisson_pred = poisson_model.predict_match(historical_df, home_team, away_team)
@@ -993,25 +976,29 @@ def render_historial() -> None:
 
 
 def main() -> None:
-    st.sidebar.header("⚽ Football Predictor")
-    uploaded_files = st.sidebar.file_uploader(
-        "Cargar archivo(s) de partidos",
-        type=["csv", "xlsx", "xls"],
-        accept_multiple_files=True,
-        help="Puedes cargar varios archivos (por ejemplo, varias temporadas de la misma liga).",
-    )
+    st.sidebar.markdown(ui_theme.render_topbar("Panel de control"), unsafe_allow_html=True)
+
+    data_block = st.sidebar.container(border=True)
+    with data_block:
+        st.markdown(ui_theme.sidebar_block_title("📁", "Datos"), unsafe_allow_html=True)
+        uploaded_files = st.file_uploader(
+            "Cargar archivo(s) de partidos",
+            type=["csv", "xlsx", "xls"],
+            accept_multiple_files=True,
+            help="Puedes cargar varios archivos (por ejemplo, varias temporadas de la misma liga).",
+        )
+        loaded_files: list[data_loader.LoadedFile] = []
+        if uploaded_files:
+            loaded_files = _load_uploaded_files(uploaded_files)
 
     if not uploaded_files:
-        st.title("⚽ Football Predictor")
-        st.markdown(
-            "Carga uno o más archivos Excel o CSV con resultados de partidos desde la "
-            "barra lateral para comenzar. La aplicación reconoce automáticamente el "
-            "formato de football-data.co.uk (Div, Date, HomeTeam, AwayTeam, FTHG, FTAG...) "
-            "y también intenta detectar variantes con otros nombres de columna."
-        )
+        st.markdown(ui_theme.render_topbar(), unsafe_allow_html=True)
+        st.markdown(ui_theme.render_hero_empty_state(), unsafe_allow_html=True)
         st.stop()
 
-    loaded_files = _load_uploaded_files(uploaded_files)
+    match_block = st.sidebar.container(border=True)
+    config_block = st.sidebar.container(border=True)
+
     loaded_files = [lf for lf in loaded_files if lf.raw_df is not None and not lf.raw_df.empty]
 
     if not loaded_files:
@@ -1026,17 +1013,18 @@ def main() -> None:
     auto_mapping = column_mapper.auto_map_columns(combined_raw)
     missing_required = column_mapper.get_missing_required(auto_mapping)
 
-    with st.sidebar.expander("🔧 Revisar mapeo de columnas", expanded=bool(missing_required)):
-        st.caption("Los campos marcados con * son obligatorios.")
-        manual_mapping: dict[str, str | None] = {}
-        options = ["-- No disponible --"] + [str(c) for c in combined_raw.columns]
-        for field in column_mapper.ALL_FIELDS:
-            label = column_mapper.FIELD_LABELS.get(field, field)
-            marker = " *" if field in column_mapper.REQUIRED_FIELDS else ""
-            default_col = auto_mapping.get(field)
-            default_index = options.index(default_col) if default_col in options else 0
-            choice = st.selectbox(f"{label}{marker}", options, index=default_index, key=f"map_{field}")
-            manual_mapping[field] = None if choice == "-- No disponible --" else choice
+    with data_block:
+        with st.expander("🔧 Revisar mapeo de columnas", expanded=bool(missing_required)):
+            st.caption("Los campos marcados con * son obligatorios.")
+            manual_mapping: dict[str, str | None] = {}
+            options = ["-- No disponible --"] + [str(c) for c in combined_raw.columns]
+            for field in column_mapper.ALL_FIELDS:
+                label = column_mapper.FIELD_LABELS.get(field, field)
+                marker = " *" if field in column_mapper.REQUIRED_FIELDS else ""
+                default_col = auto_mapping.get(field)
+                default_index = options.index(default_col) if default_col in options else 0
+                choice = st.selectbox(f"{label}{marker}", options, index=default_index, key=f"map_{field}")
+                manual_mapping[field] = None if choice == "-- No disponible --" else choice
 
     missing_required = column_mapper.get_missing_required(manual_mapping)
     if missing_required:
@@ -1058,16 +1046,18 @@ def main() -> None:
             season_labels.append(column_mapper.infer_season_label(dates))
     season_labels = sorted(set(season_labels))
 
-    competition_value = None
-    if "competition" in mapped_df.columns:
-        auto_competition = column_mapper.detect_single_value_competition(mapped_df)
-        if auto_competition:
-            competition_value = auto_competition
-        else:
-            unique_competitions = sorted(mapped_df["competition"].dropna().unique().tolist())
-            if len(unique_competitions) > 1:
-                chosen = st.sidebar.selectbox("Competición", ["Todas"] + unique_competitions)
-                competition_value = None if chosen == "Todas" else chosen
+    with match_block:
+        st.markdown(ui_theme.sidebar_block_title("🏆", "Partido a analizar"), unsafe_allow_html=True)
+        competition_value = None
+        if "competition" in mapped_df.columns:
+            auto_competition = column_mapper.detect_single_value_competition(mapped_df)
+            if auto_competition:
+                competition_value = auto_competition
+            else:
+                unique_competitions = sorted(mapped_df["competition"].dropna().unique().tolist())
+                if len(unique_competitions) > 1:
+                    chosen = st.selectbox("Competición", ["Todas"] + unique_competitions)
+                    competition_value = None if chosen == "Todas" else chosen
 
     if competition_value:
         mapped_df = mapped_df[mapped_df["competition"] == competition_value]
@@ -1086,12 +1076,14 @@ def main() -> None:
         st.error("Se necesitan al menos dos equipos distintos en los datos para poder comparar.")
         st.stop()
 
-    st.sidebar.markdown("---")
-    home_team = st.sidebar.selectbox("Equipo local", teams, key="home_team_select")
-    default_away_index = 1 if len(teams) > 1 and teams[1] != home_team else 0
-    away_team = st.sidebar.selectbox("Equipo visitante", teams, index=default_away_index, key="away_team_select")
+    with match_block:
+        home_team = st.selectbox("Equipo local", teams, key="home_team_select")
+        default_away_index = 1 if len(teams) > 1 and teams[1] != home_team else 0
+        away_team = st.selectbox("Equipo visitante", teams, index=default_away_index, key="away_team_select")
 
-    recent_n = st.sidebar.slider("Partidos recientes para calcular la forma", min_value=3, max_value=15, value=5)
+    with config_block:
+        st.markdown(ui_theme.sidebar_block_title("⚙️", "Configuración del análisis"), unsafe_allow_html=True)
+        recent_n = st.slider("Partidos recientes para calcular la forma", min_value=3, max_value=15, value=5)
 
     with st.spinner("🧠 Entrenando y validando los modelos (Poisson + regresión logística)..."):
         logistic_result = _train_logistic_cached(historical_df, recent_n)
@@ -1110,19 +1102,22 @@ def main() -> None:
     else:
         model_options = ["Poisson"]
         default_model_index = 0
-        st.sidebar.caption(
-            f"Regresión logística y Combinado no disponibles: se necesitan al menos "
-            f"{MIN_MATCHES_FOR_ML_MODEL} partidos utilizables tras calcular variables "
-            f"(hay {logistic_result.n_usable_matches}). Ver pestaña 'Rendimiento del modelo'."
+
+    with config_block:
+        model_choice = st.selectbox(
+            "Modelo de predicción",
+            model_options,
+            index=default_model_index,
+            key="model_select",
         )
+        if not logistic_result.trained:
+            st.caption(
+                f"Regresión logística y Combinado no disponibles: se necesitan al menos "
+                f"{MIN_MATCHES_FOR_ML_MODEL} partidos utilizables tras calcular variables "
+                f"(hay {logistic_result.n_usable_matches}). Ver pestaña 'Rendimiento del modelo'."
+            )
 
-    model_choice = st.sidebar.selectbox(
-        "Modelo de predicción",
-        model_options,
-        index=default_model_index,
-        key="model_select",
-    )
-
+    st.sidebar.write("")
     run = st.sidebar.button("▶ Ejecutar análisis", type="primary", use_container_width=True)
 
     team_errors = statistics.validate_team_selection(historical_df, home_team, away_team)
