@@ -1,0 +1,13 @@
+# Entorno virtual y caché de Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Modelos entrenados (se regeneran solos al cargar datos) e historial
+# de predicciones (estado personal del usuario, no código fuente).
+models/*.joblib
+data/prediction_history.csv
+
+# Streamlit
+.streamlit/secrets.toml
