@@ -61,8 +61,8 @@ def inject_global_css() -> str:
         padding: 14px 18px 10px 18px;
         box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
     }}
-    div[data-testid="stMetricLabel"] {{ color: {INK_600}; }}
-    div[data-testid="stMetricValue"] {{ color: {INK_900}; font-weight: 700; }}
+    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p {{ color: {INK_600} !important; }}
+    div[data-testid="stMetricValue"], div[data-testid="stMetricValue"] p {{ color: {INK_900} !important; font-weight: 700; }}
 
     /* -- Botones primarios (Ejecutar análisis, etc.) -- */
     button[kind="primary"] {{
