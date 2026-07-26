@@ -421,37 +421,67 @@ def _render_goals_markets_and_matrix(prediction: poisson_model.PoissonPrediction
     dnb_home = round(prediction.prob_home_win / dnb_total * 100, 1) if dnb_total > 0 else None
     dnb_away = round(prediction.prob_away_win / dnb_total * 100, 1) if dnb_total > 0 else None
 
+    # Umbral a partir del cual un mercado se considera "de probabilidad alta"
+    # y se destaca. Streamlit no permite combinar una ProgressColumn con
+    # color de fondo por fila en la misma tabla, así que el resaltado se
+    # logra ordenando de mayor a menor probabilidad y marcando esas filas
+    # con 🔥 en el propio nombre del mercado.
+    HIGH_PROB_THRESHOLD = 65.0
+
+    def _highlight(label: str, value: float | None) -> str:
+        return f"🔥 {label}" if value is not None and value >= HIGH_PROB_THRESHOLD else label
+
     market_rows = [
-        {"Mercado": "Más de 1.5 goles", "Probabilidad": format_pct(prediction.prob_over[1.5])},
-        {"Mercado": "Menos de 1.5 goles", "Probabilidad": format_pct(prediction.prob_under[1.5])},
-        {"Mercado": "Más de 2.5 goles", "Probabilidad": format_pct(prediction.prob_over[2.5])},
-        {"Mercado": "Menos de 2.5 goles", "Probabilidad": format_pct(prediction.prob_under[2.5])},
-        {"Mercado": "Más de 3.5 goles", "Probabilidad": format_pct(prediction.prob_over[3.5])},
-        {"Mercado": "Menos de 3.5 goles", "Probabilidad": format_pct(prediction.prob_under[3.5])},
-        {"Mercado": "Ambos equipos anotan", "Probabilidad": format_pct(prediction.prob_btts_yes)},
-        {"Mercado": "Ambos equipos NO anotan", "Probabilidad": format_pct(prediction.prob_btts_no)},
-        {"Mercado": f"Portería a cero — {home_team}", "Probabilidad": format_pct(prediction.prob_clean_sheet_home)},
-        {"Mercado": f"Portería a cero — {away_team}", "Probabilidad": format_pct(prediction.prob_clean_sheet_away)},
+        {"Mercado": "Más de 1.5 goles", "Probabilidad (%)": prediction.prob_over[1.5]},
+        {"Mercado": "Menos de 1.5 goles", "Probabilidad (%)": prediction.prob_under[1.5]},
+        {"Mercado": "Más de 2.5 goles", "Probabilidad (%)": prediction.prob_over[2.5]},
+        {"Mercado": "Menos de 2.5 goles", "Probabilidad (%)": prediction.prob_under[2.5]},
+        {"Mercado": "Más de 3.5 goles", "Probabilidad (%)": prediction.prob_over[3.5]},
+        {"Mercado": "Menos de 3.5 goles", "Probabilidad (%)": prediction.prob_under[3.5]},
+        {"Mercado": "Ambos equipos anotan", "Probabilidad (%)": prediction.prob_btts_yes},
+        {"Mercado": "Ambos equipos NO anotan", "Probabilidad (%)": prediction.prob_btts_no},
+        {"Mercado": f"Portería a cero — {home_team}", "Probabilidad (%)": prediction.prob_clean_sheet_home},
+        {"Mercado": f"Portería a cero — {away_team}", "Probabilidad (%)": prediction.prob_clean_sheet_away},
         {
             "Mercado": "Doble oportunidad 1X",
-            "Probabilidad": format_pct(round(prediction.prob_home_win + prediction.prob_draw, 1)),
+            "Probabilidad (%)": round(prediction.prob_home_win + prediction.prob_draw, 1),
         },
         {
             "Mercado": "Doble oportunidad X2",
-            "Probabilidad": format_pct(round(prediction.prob_draw + prediction.prob_away_win, 1)),
+            "Probabilidad (%)": round(prediction.prob_draw + prediction.prob_away_win, 1),
         },
         {
             "Mercado": "Doble oportunidad 12",
-            "Probabilidad": format_pct(round(prediction.prob_home_win + prediction.prob_away_win, 1)),
+            "Probabilidad (%)": round(prediction.prob_home_win + prediction.prob_away_win, 1),
         },
-        {"Mercado": f"Victoria sin empate — {home_team}", "Probabilidad": format_pct(dnb_home)},
-        {"Mercado": f"Victoria sin empate — {away_team}", "Probabilidad": format_pct(dnb_away)},
-        {
-            "Mercado": "Total de goles esperados",
-            "Probabilidad": format_metric(round(prediction.expected_home_goals + prediction.expected_away_goals, 2)),
-        },
+        {"Mercado": f"Victoria sin empate — {home_team}", "Probabilidad (%)": dnb_home},
+        {"Mercado": f"Victoria sin empate — {away_team}", "Probabilidad (%)": dnb_away},
     ]
-    st.dataframe(pd.DataFrame(market_rows), use_container_width=True, hide_index=True)
+    for row in market_rows:
+        row["Mercado"] = _highlight(row["Mercado"], row["Probabilidad (%)"])
+
+    market_df = pd.DataFrame(market_rows).sort_values(
+        "Probabilidad (%)", ascending=False, na_position="last", ignore_index=True
+    )
+
+    st.dataframe(
+        market_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Probabilidad (%)": st.column_config.ProgressColumn(
+                "Probabilidad",
+                help=f"🔥 = probabilidad ≥ {HIGH_PROB_THRESHOLD:.0f}%. Datos insuficientes se muestran vacíos.",
+                format="%.1f%%",
+                min_value=0,
+                max_value=100,
+            ),
+        },
+    )
+    st.caption(
+        f"Total de goles esperados: "
+        f"{format_metric(round(prediction.expected_home_goals + prediction.expected_away_goals, 2))}"
+    )
 
     st.markdown("---")
     st.subheader("Matriz de marcadores")
