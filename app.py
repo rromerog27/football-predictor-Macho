@@ -1148,7 +1148,17 @@ def main() -> None:
             )
 
     st.sidebar.write("")
-    run = st.sidebar.button("▶ Ejecutar análisis", type="primary", use_container_width=True)
+    run_clicked = st.sidebar.button("▶ Ejecutar análisis", type="primary", use_container_width=True)
+    # st.button() solo devuelve True en el rerun inmediatamente posterior al
+    # clic: cualquier otra interacción dentro de las pestañas de resultado
+    # (guardar en el historial, descargar un CSV/Excel) dispara un nuevo
+    # rerun completo del script en el que este botón vuelve a valer False,
+    # lo que borraba los resultados antes de que esas acciones terminaran de
+    # ejecutarse. Se persiste en session_state para que, una vez ejecutado
+    # el análisis, siga visible ante cualquier otra interacción.
+    if run_clicked:
+        st.session_state["analysis_run"] = True
+    run = st.session_state.get("analysis_run", False)
 
     team_errors = statistics.validate_team_selection(historical_df, home_team, away_team)
 
