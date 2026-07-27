@@ -4,10 +4,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# Modelos entrenados (se regeneran solos al cargar datos) e historial
-# de predicciones (estado personal del usuario, no código fuente).
+# Modelos entrenados (se regeneran solos al cargar datos).
 models/*.joblib
-data/prediction_history.csv
 
 # Streamlit
 .streamlit/secrets.toml

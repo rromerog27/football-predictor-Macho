@@ -8,7 +8,7 @@ estadísticas de un partido mediante un modelo de distribución de Poisson.
 No se consulta internet, rankings, lesiones, alineaciones ni datos
 históricos externos.
 
-## Estado actual: Fase 3 — Exportación e historial (completa)
+## Estado actual: Fase 3 — Exportación (completa)
 
 Implementado hasta ahora:
 
@@ -52,14 +52,6 @@ Implementado hasta ahora:
   dos equipos (Excel con varias hojas), la matriz de marcadores (CSV) y un
   reporte HTML completo autocontenido (fecha del análisis, archivo,
   equipos comparados, resultados y advertencias).
-- `prediction_history.py`: historial de predicciones persistido en
-  `data/prediction_history.csv`. Cada predicción guardada registra fecha,
-  partido, probabilidades, resultado pronosticado, modelo utilizado y
-  versión del modelo; permite completar después el resultado real y
-  calcula el rendimiento histórico (accuracy general y por modelo).
-- Pestaña "Historial de predicciones" en el dashboard, con botón para
-  guardar cada predicción, formulario para cargar resultados reales, y
-  métricas de rendimiento histórico.
 - Botones de descarga distribuidos en cada sección relevante del
   dashboard (Resumen, Comparación, Predicción, Rendimiento del modelo).
 
@@ -116,7 +108,7 @@ football_predictor/
 ├── requirements.txt          # Dependencias del proyecto
 ├── README.md                 # Este archivo
 │
-├── data/                     # Archivos de datos locales (ejemplo + historial de predicciones)
+├── data/                     # Archivos de datos locales (ejemplo)
 ├── models/                   # Modelos entrenados guardados (joblib)
 ├── reports/                  # Carpeta reservada para futuros reportes guardados a disco
 │
@@ -130,7 +122,6 @@ football_predictor/
 │   ├── feature_engineering.py  # Variables pre-partido sin fuga de información
 │   ├── prediction_model.py     # Regresión logística de respaldo + predicción combinada
 │   ├── report_generator.py     # Exportación a CSV, Excel y HTML
-│   ├── prediction_history.py   # Historial de predicciones persistido en CSV
 │   ├── market_odds.py          # Comparación contra cuotas de mercado + simulación de value bets
 │   ├── visualizations.py       # Construcción de gráficos Plotly
 │   └── utils.py                 # Utilidades comunes (safe_divide, logging, formateo)
@@ -139,7 +130,7 @@ football_predictor/
     ├── test_data_loader.py     # Pruebas de carga y limpieza de columnas de cuotas
     ├── test_statistics.py      # Pruebas de cálculo de estadísticas
     ├── test_predictions.py     # Pruebas de feature engineering, regresión logística y combinación
-    ├── test_reports.py         # Pruebas de exportación e historial de predicciones
+    ├── test_reports.py         # Pruebas de exportación (CSV/Excel/HTML)
     └── test_market_odds.py     # Pruebas de probabilidad implícita y simulación de apuestas de valor
 ```
 
@@ -156,7 +147,6 @@ football_predictor/
 | `src/feature_engineering.py` | Construye las variables pre-partido (forma, rendimiento local/visitante, descanso) para cada fila de entrenamiento, usando solo partidos anteriores a la fecha del partido (sin fuga de información). |
 | `src/prediction_model.py` | Entrena y calibra la regresión logística de respaldo, calcula sus métricas de validación, y combina sus probabilidades con las de Poisson ponderando por desempeño de validación (log loss). |
 | `src/report_generator.py` | Exporta a CSV/Excel/HTML lo que ya calcularon los demás módulos: tabla de estadísticas, predicción de un partido, comparación de equipos, matriz de marcadores y el reporte HTML completo. |
-| `src/prediction_history.py` | Guarda cada predicción en `data/prediction_history.csv`, permite cargar después el resultado real y calcula el rendimiento histórico del sistema (accuracy general y por modelo). |
 | `src/market_odds.py` | Convierte cuotas 1X2 a probabilidad implícita (quitando el margen de la casa), evalúa qué tan bien predice el mercado los partidos de prueba, y simula en retrospectiva una estrategia de apuestas de valor comparando el modelo contra el mercado. |
 | `src/visualizations.py` | Construye los gráficos Plotly (barras, radar, evolución de forma, mapas de calor, importancia de variables) a partir de datos ya calculados. |
 | `src/utils.py` | Funciones auxiliares compartidas: división segura, formateo de porcentajes/métricas, logging, semilla aleatoria y umbrales de suficiencia de datos. |
@@ -220,8 +210,8 @@ pytest tests/ -v
 
 ## Hoja de ruta
 
-Las tres fases planeadas (base funcional, modelo de respaldo, exportación
-e historial) están completas.
+Las tres fases planeadas (base funcional, modelo de respaldo, exportación)
+están completas.
 
 **Mejoras futuras** (no implementadas todavía, mencionadas pero fuera de
 alcance por ahora): Random Forest / Gradient Boosting / XGBoost como

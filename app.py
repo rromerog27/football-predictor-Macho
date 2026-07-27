@@ -21,7 +21,6 @@ from src import (
     feature_engineering,
     market_odds,
     poisson_model,
-    prediction_history,
     prediction_model,
     report_generator,
     statistics,
@@ -638,7 +637,7 @@ def render_prediccion(
     )
 
     # ----------------------------------------------------------------
-    # Guardar en el historial y exportar (Fase 3)
+    # Exportar
     # ----------------------------------------------------------------
     predicted_outcome = max(
         {"H": final_prob_home, "D": final_prob_draw, "A": final_prob_away}.items(), key=lambda kv: kv[1]
@@ -659,21 +658,12 @@ def render_prediccion(
         "confidence": confidence,
         "expected_home_goals": expected_home_goals if expected_home_goals is not None else "",
         "expected_away_goals": expected_away_goals if expected_away_goals is not None else "",
-        "actual_home_goals": "",
-        "actual_away_goals": "",
-        "actual_outcome": "",
-        "correct": "",
     }
 
     st.markdown("---")
-    st.subheader("Guardar y exportar")
+    st.subheader("Exportar")
 
-    save_col, csv_col, matrix_col, html_col = st.columns(4)
-
-    with save_col:
-        if st.button("💾 Guardar en el historial", use_container_width=True):
-            saved_id = prediction_history.append_prediction(record)
-            st.success(f"Predicción #{saved_id} guardada. Revisa la pestaña 'Historial de predicciones'.")
+    csv_col, matrix_col, html_col = st.columns(3)
 
     with csv_col:
         st.download_button(
@@ -930,76 +920,6 @@ def render_rendimiento(
     )
 
 
-def render_historial() -> None:
-    st.header("📜 Historial de predicciones")
-    st.caption(
-        "Se guarda localmente en data/prediction_history.csv. Completa el resultado real de un "
-        "partido para que cuente en el rendimiento histórico del sistema."
-    )
-
-    history_df = prediction_history.load_history()
-
-    if history_df.empty:
-        st.info(
-            "Todavía no has guardado ninguna predicción. Ve a la pestaña 'Predicción principal', "
-            "genera una predicción y usa el botón 'Guardar en el historial'."
-        )
-        return
-
-    display_cols = [
-        "id", "timestamp", "home_team", "away_team", "model_used",
-        "prob_home_win", "prob_draw", "prob_away_win", "predicted_outcome",
-        "confidence", "actual_outcome", "correct",
-    ]
-    st.dataframe(history_df[display_cols], use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.subheader("Completar resultado real de un partido")
-
-    pending = prediction_history.pending_records(history_df)
-    if pending.empty:
-        st.write("No hay predicciones pendientes de resultado.")
-    else:
-        options = {
-            f"#{row.id} — {row.home_team} vs {row.away_team} ({row.timestamp})": int(row.id)
-            for row in pending.itertuples()
-        }
-        choice_label = st.selectbox("Predicción a completar", list(options.keys()))
-        chosen_id = options[choice_label]
-
-        g1, g2, g3 = st.columns([1, 1, 1])
-        actual_home_goals = g1.number_input("Goles del local", min_value=0, max_value=20, step=1, key="actual_home_goals")
-        actual_away_goals = g2.number_input("Goles del visitante", min_value=0, max_value=20, step=1, key="actual_away_goals")
-        if g3.button("Guardar resultado real", use_container_width=True):
-            prediction_history.update_actual_result(chosen_id, int(actual_home_goals), int(actual_away_goals))
-            st.success(f"Resultado real guardado para la predicción #{chosen_id}.")
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("Rendimiento histórico del sistema")
-    performance = prediction_history.compute_performance(history_df)
-
-    p1, p2, p3 = st.columns(3)
-    p1.metric("Predicciones guardadas", performance["total_predictions"])
-    p2.metric("Con resultado cargado", performance["resolved"])
-    p3.metric("Accuracy general", format_pct(performance["accuracy"]))
-
-    if performance["by_model"]:
-        st.write("**Accuracy por modelo utilizado:**")
-        by_model_rows = [
-            {"Modelo": model, "Predicciones resueltas": v["n"], "Accuracy": format_pct(v["accuracy"])}
-            for model, v in performance["by_model"].items()
-        ]
-        st.dataframe(pd.DataFrame(by_model_rows), use_container_width=True, hide_index=True)
-
-    st.download_button(
-        "⬇ Descargar historial completo (CSV)",
-        data=history_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="historial_predicciones.csv",
-        mime="text/csv",
-    )
-
-
 # ---------------------------------------------------------------------------
 # Flujo principal
 # ---------------------------------------------------------------------------
@@ -1169,14 +1089,13 @@ def main() -> None:
     competition_label = competition_value or "N/D"
     season_label = ", ".join(season_labels) if season_labels else "N/D"
 
-    tab_inicio, tab_resumen, tab_comparacion, tab_prediccion, tab_rendimiento, tab_historial = st.tabs(
+    tab_inicio, tab_resumen, tab_comparacion, tab_prediccion, tab_rendimiento = st.tabs(
         [
             "🏠 Inicio",
             "📊 Resumen del dataset",
             "🆚 Comparación de equipos",
             "🔮 Predicción principal",
             "🧮 Rendimiento del modelo",
-            "📜 Historial de predicciones",
         ]
     )
 
@@ -1219,9 +1138,6 @@ def main() -> None:
 
     with tab_rendimiento:
         render_rendimiento(logistic_result, poisson_bt, manual_mapping, poisson_test_df, poisson_test_predictions)
-
-    with tab_historial:
-        render_historial()
 
 
 if __name__ == "__main__":
