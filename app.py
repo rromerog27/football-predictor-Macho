@@ -491,6 +491,66 @@ def _render_goals_markets_and_matrix(prediction: poisson_model.PoissonPrediction
     st.plotly_chart(visualizations.top_scores_bar(prediction.top_scores), use_container_width=True)
 
 
+def _render_count_stat_markets(historical_df: pd.DataFrame, home_team: str, away_team: str) -> None:
+    """Mercados de over/under para tiros, tiros a puerta, córners y
+    tarjetas amarillas, con el mismo motor de Poisson usado para goles.
+    No muestra nada si el archivo no trae ninguna de estas columnas."""
+    stat_flags = statistics.stat_columns_available(historical_df)
+    available_keys = [k for k in poisson_model.COUNT_STAT_CONFIG if stat_flags.get(k)]
+    if not available_keys:
+        return
+
+    predictions = []
+    for key in available_keys:
+        pred = poisson_model.predict_count_stat(historical_df, home_team, away_team, key)
+        if pred is not None:
+            predictions.append(pred)
+    if not predictions:
+        return
+
+    st.markdown("---")
+    st.subheader("Mercados de tiros, córners y tarjetas")
+    st.caption(
+        "Mismo modelo de Poisson que los goles, aplicado a estas estadísticas. Las líneas de "
+        "over/under se calculan a partir del promedio real de tu archivo, no son fijas."
+    )
+
+    cols = st.columns(len(predictions))
+    for col, pred in zip(cols, predictions):
+        col.metric(f"{pred.label} esperados (total)", format_metric(pred.expected_total))
+        col.caption(f"{home_team}: {pred.expected_home:.1f} · {away_team}: {pred.expected_away:.1f}")
+
+    HIGH_PROB_THRESHOLD = 65.0
+    rows = []
+    for pred in predictions:
+        for t in pred.thresholds:
+            rows.append({"Mercado": f"{pred.label} — Más de {t}", "Probabilidad (%)": pred.prob_over[t]})
+            rows.append({"Mercado": f"{pred.label} — Menos de {t}", "Probabilidad (%)": pred.prob_under[t]})
+    for row in rows:
+        if row["Probabilidad (%)"] >= HIGH_PROB_THRESHOLD:
+            row["Mercado"] = f"🔥 {row['Mercado']}"
+
+    market_df = pd.DataFrame(rows).sort_values("Probabilidad (%)", ascending=False, ignore_index=True)
+    st.dataframe(
+        market_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Probabilidad (%)": st.column_config.ProgressColumn(
+                "Probabilidad",
+                help=f"🔥 = probabilidad ≥ {HIGH_PROB_THRESHOLD:.0f}%.",
+                format="%.1f%%",
+                min_value=0,
+                max_value=100,
+            ),
+        },
+    )
+
+    all_warnings = [w for pred in predictions for w in pred.warnings]
+    for w in dict.fromkeys(all_warnings):  # sin duplicados, conserva el orden
+        st.caption(f"⚠ {w}")
+
+
 def render_prediccion(
     historical_df: pd.DataFrame,
     home_team: str,
@@ -537,6 +597,7 @@ def render_prediccion(
         _render_probability_row(home_team, away_team, poisson_pred.prob_home_win, poisson_pred.prob_draw, poisson_pred.prob_away_win)
         st.markdown("---")
         _render_goals_markets_and_matrix(poisson_pred, home_team, away_team)
+        _render_count_stat_markets(historical_df, home_team, away_team)
 
         top_score, top_prob = poisson_pred.top_scores[0]
         explanation = (
@@ -610,6 +671,7 @@ def render_prediccion(
         _render_probability_row(home_team, away_team, combined.prob_home_win, combined.prob_draw, combined.prob_away_win)
         st.markdown("---")
         _render_goals_markets_and_matrix(poisson_pred, home_team, away_team)
+        _render_count_stat_markets(historical_df, home_team, away_team)
 
         top_score, top_prob = poisson_pred.top_scores[0]
         explanation = (

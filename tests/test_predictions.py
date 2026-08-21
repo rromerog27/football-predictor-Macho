@@ -122,6 +122,63 @@ def test_predict_logistic_returns_none_when_untrained(tiny_df):
 
 
 # --------------------------------------------------------------------------
+# poisson_model.py — mercados de tiros, córners y tarjetas
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def df_with_corners(big_df) -> pd.DataFrame:
+    """Reusa la liga sintética de goles y le agrega córners sintéticos con
+    una señal real (equipos con más goles de local tienden a rondar más),
+    para poder probar predict_count_stat con datos numéricos de verdad."""
+    rng = np.random.default_rng(7)
+    df = big_df.copy()
+    base = 3 + df["home_goals"] * 0.8
+    df["home_corners"] = rng.poisson(np.clip(base, 1, None)).astype(float)
+    df["away_corners"] = rng.poisson(3.5, size=len(df)).astype(float)
+    return df
+
+
+def test_predict_count_stat_returns_none_when_columns_missing(big_df):
+    assert poisson_model.predict_count_stat(big_df, "Team0", "Team1", "corners") is None
+
+
+def test_predict_count_stat_returns_valid_prediction(df_with_corners):
+    pred = poisson_model.predict_count_stat(df_with_corners, "Team0", "Team1", "corners")
+    assert pred is not None
+    assert pred.expected_home > 0
+    assert pred.expected_away > 0
+    assert pred.expected_total == pytest.approx(pred.expected_home + pred.expected_away, abs=0.01)
+    assert len(pred.thresholds) == 3
+    assert pred.thresholds == sorted(pred.thresholds)
+
+    # Probabilidad de superar un umbral más alto nunca puede ser mayor.
+    ordered_over = [pred.prob_over[t] for t in pred.thresholds]
+    assert ordered_over == sorted(ordered_over, reverse=True)
+
+    for t in pred.thresholds:
+        assert pred.prob_over[t] + pred.prob_under[t] == pytest.approx(100.0, abs=0.2)
+
+    assert pred.confidence in {"alta", "media", "baja"}
+
+
+def test_predict_count_stat_unknown_stat_key_raises(df_with_corners):
+    with pytest.raises(KeyError):
+        poisson_model.predict_count_stat(df_with_corners, "Team0", "Team1", "not_a_real_stat")
+
+
+def test_derive_thresholds_centers_around_mean_and_has_three_steps():
+    thresholds = poisson_model._derive_thresholds(10.2)
+    assert len(thresholds) == 3
+    assert thresholds == [8.5, 9.5, 10.5]
+
+
+def test_derive_thresholds_never_goes_below_half():
+    thresholds = poisson_model._derive_thresholds(0.3)
+    assert thresholds[0] >= 0.5
+
+
+# --------------------------------------------------------------------------
 # poisson_model.py — backtest y split cronológico
 # --------------------------------------------------------------------------
 

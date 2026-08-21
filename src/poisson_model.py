@@ -70,16 +70,25 @@ class PoissonPrediction:
     warnings: list[str] = field(default_factory=list)
 
 
-def _league_averages(df: pd.DataFrame) -> tuple[float, float]:
-    avg_home = df["home_goals"].mean()
-    avg_away = df["away_goals"].mean()
+def _league_averages(
+    df: pd.DataFrame, home_col: str = "home_goals", away_col: str = "away_goals"
+) -> tuple[float, float]:
+    avg_home = df[home_col].mean()
+    avg_away = df[away_col].mean()
     return float(avg_home), float(avg_away)
 
 
 def _team_home_attack_defense(
-    df: pd.DataFrame, team: str, league_avg_home: float, league_avg_away: float
+    df: pd.DataFrame,
+    team: str,
+    league_avg_home: float,
+    league_avg_away: float,
+    home_col: str = "home_goals",
+    away_col: str = "away_goals",
 ) -> tuple[TeamStrength, TeamStrength]:
-    """Fortaleza de ataque y defensa del equipo jugando de LOCAL."""
+    """Fortaleza de ataque y defensa del equipo jugando de LOCAL, para la
+    estadística de conteo dada por `home_col`/`away_col` (goles por
+    defecto; también se usa con tiros, córners y tarjetas)."""
     matches = team_matches(df, team, venue="home")
     n = len(matches)
     if n == 0 or league_avg_home == 0 or league_avg_away == 0:
@@ -87,17 +96,23 @@ def _team_home_attack_defense(
             TeamStrength(attack=1.0, defense=1.0, matches_used=n, used_fallback=True),
             TeamStrength(attack=1.0, defense=1.0, matches_used=n, used_fallback=True),
         )
-    avg_scored = matches["home_goals"].mean()
-    avg_conceded = matches["away_goals"].mean()
+    avg_scored = matches[home_col].mean()
+    avg_conceded = matches[away_col].mean()
     attack = TeamStrength(avg_scored / league_avg_home, 0.0, n, False)
     defense = TeamStrength(0.0, avg_conceded / league_avg_away, n, False)
     return attack, defense
 
 
 def _team_away_attack_defense(
-    df: pd.DataFrame, team: str, league_avg_home: float, league_avg_away: float
+    df: pd.DataFrame,
+    team: str,
+    league_avg_home: float,
+    league_avg_away: float,
+    home_col: str = "home_goals",
+    away_col: str = "away_goals",
 ) -> tuple[TeamStrength, TeamStrength]:
-    """Fortaleza de ataque y defensa del equipo jugando de VISITANTE."""
+    """Fortaleza de ataque y defensa del equipo jugando de VISITANTE, para
+    la estadística de conteo dada por `home_col`/`away_col`."""
     matches = team_matches(df, team, venue="away")
     n = len(matches)
     if n == 0 or league_avg_home == 0 or league_avg_away == 0:
@@ -105,8 +120,8 @@ def _team_away_attack_defense(
             TeamStrength(attack=1.0, defense=1.0, matches_used=n, used_fallback=True),
             TeamStrength(attack=1.0, defense=1.0, matches_used=n, used_fallback=True),
         )
-    avg_scored = matches["away_goals"].mean()
-    avg_conceded = matches["home_goals"].mean()
+    avg_scored = matches[away_col].mean()
+    avg_conceded = matches[home_col].mean()
     attack = TeamStrength(avg_scored / league_avg_away, 0.0, n, False)
     defense = TeamStrength(0.0, avg_conceded / league_avg_home, n, False)
     return attack, defense
@@ -218,6 +233,140 @@ def predict_match(df: pd.DataFrame, home_team: str, away_team: str) -> PoissonPr
         prob_clean_sheet_away=round(prob_clean_sheet_away * 100, 1),
         score_matrix=display_matrix,
         top_scores=[(score, round(p * 100, 1)) for score, p in top_scores],
+        home_matches_used=home_attack.matches_used,
+        away_matches_used=away_attack.matches_used,
+        confidence=confidence,
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------------
+# Mercados de tiros, tiros a puerta, córners y tarjetas
+# --------------------------------------------------------------------------
+#
+# Reutiliza el mismo motor de Poisson (fuerza de ataque/defensa relativa a
+# la liga) que se usa para goles: tiros, tiros a puerta, córners y tarjetas
+# son igual de "conteos de eventos por partido", así que el mismo modelo
+# aplica sin duplicar lógica. Solo se calcula el total combinado
+# (local + visitante) para mercados de over/under, aprovechando que la
+# suma de dos variables Poisson independientes es a su vez Poisson con la
+# tasa combinada — no hace falta una matriz conjunta como con los goles.
+
+COUNT_STAT_CONFIG: dict[str, dict[str, str]] = {
+    "shots": {"home_col": "home_shots", "away_col": "away_shots", "label": "Tiros"},
+    "shots_on_target": {"home_col": "home_shots_target", "away_col": "away_shots_target", "label": "Tiros a puerta"},
+    "corners": {"home_col": "home_corners", "away_col": "away_corners", "label": "Córners"},
+    "yellow_cards": {"home_col": "home_yellow", "away_col": "away_yellow", "label": "Tarjetas amarillas"},
+}
+
+# Los conteos esperados se acotan a un rango amplio pero plausible, igual
+# que con los goles, para evitar estimaciones degeneradas con muestras muy
+# chicas.
+EXPECTED_COUNT_MIN = 0.2
+EXPECTED_COUNT_MAX = 30.0
+
+
+@dataclass
+class CountStatPrediction:
+    stat_key: str
+    label: str
+    home_team: str
+    away_team: str
+    expected_home: float
+    expected_away: float
+    expected_total: float
+    thresholds: list[float]
+    prob_over: dict[float, float]
+    prob_under: dict[float, float]
+    most_likely_total: int
+    most_likely_total_prob: float
+    home_matches_used: int
+    away_matches_used: int
+    confidence: str
+    warnings: list[str] = field(default_factory=list)
+
+
+def _derive_thresholds(expected_total: float, n: int = 3) -> list[float]:
+    """Líneas de over/under centradas en el promedio real del archivo (no
+    fijas), para que se adapten solas a la liga cargada (una segunda
+    división con menos córners por partido que una primera, por ejemplo)."""
+    center = round(expected_total)
+    start = max(0.5, center - 1.5)
+    return [round(start + i, 1) for i in range(n)]
+
+
+def predict_count_stat(df: pd.DataFrame, home_team: str, away_team: str, stat_key: str) -> CountStatPrediction | None:
+    """Predicción de over/under para una estadística de conteo (tiros,
+    tiros a puerta, córners o tarjetas amarillas). Devuelve `None` cuando
+    el archivo no trae esas columnas o no tienen datos numéricos
+    utilizables — nunca se inventa un valor."""
+    config = COUNT_STAT_CONFIG[stat_key]
+    home_col, away_col = config["home_col"], config["away_col"]
+
+    if home_col not in df.columns or away_col not in df.columns:
+        return None
+    if df[home_col].notna().sum() == 0 or df[away_col].notna().sum() == 0:
+        return None
+
+    league_avg_home, league_avg_away = _league_averages(df, home_col, away_col)
+    if pd.isna(league_avg_home) or pd.isna(league_avg_away) or league_avg_home == 0 or league_avg_away == 0:
+        return None
+
+    warnings: list[str] = []
+    home_attack, home_defense = _team_home_attack_defense(
+        df, home_team, league_avg_home, league_avg_away, home_col, away_col
+    )
+    away_attack, away_defense = _team_away_attack_defense(
+        df, away_team, league_avg_home, league_avg_away, home_col, away_col
+    )
+
+    if home_attack.used_fallback:
+        warnings.append(
+            f"'{home_team}' no tiene partidos con datos de {config['label'].lower()} como local; "
+            "se usó el promedio general de la liga."
+        )
+    if away_attack.used_fallback:
+        warnings.append(
+            f"'{away_team}' no tiene partidos con datos de {config['label'].lower()} como visitante; "
+            "se usó el promedio general de la liga."
+        )
+
+    expected_home = home_attack.attack * away_defense.defense * league_avg_home
+    expected_away = away_attack.attack * home_defense.defense * league_avg_away
+    expected_home = float(np.clip(expected_home, EXPECTED_COUNT_MIN, EXPECTED_COUNT_MAX))
+    expected_away = float(np.clip(expected_away, EXPECTED_COUNT_MIN, EXPECTED_COUNT_MAX))
+    expected_total = expected_home + expected_away
+
+    # Suma de dos Poisson independientes = Poisson(lambda_home + lambda_away).
+    max_count = int(expected_total + 6 * (expected_total ** 0.5) + 10)
+    counts = np.arange(0, max_count + 1)
+    total_probs = poisson.pmf(counts, expected_total)
+
+    thresholds = _derive_thresholds(expected_total)
+    prob_over: dict[float, float] = {}
+    prob_under: dict[float, float] = {}
+    for t in thresholds:
+        p_over = float(total_probs[counts > t].sum())
+        prob_over[t] = round(p_over * 100, 1)
+        prob_under[t] = round((1 - p_over) * 100, 1)
+
+    most_likely_idx = int(np.argmax(total_probs))
+
+    confidence = _classify_confidence(home_attack.matches_used, away_attack.matches_used)
+
+    return CountStatPrediction(
+        stat_key=stat_key,
+        label=config["label"],
+        home_team=home_team,
+        away_team=away_team,
+        expected_home=round(expected_home, 2),
+        expected_away=round(expected_away, 2),
+        expected_total=round(expected_total, 2),
+        thresholds=thresholds,
+        prob_over=prob_over,
+        prob_under=prob_under,
+        most_likely_total=int(counts[most_likely_idx]),
+        most_likely_total_prob=round(float(total_probs[most_likely_idx]) * 100, 1),
         home_matches_used=home_attack.matches_used,
         away_matches_used=away_attack.matches_used,
         confidence=confidence,
