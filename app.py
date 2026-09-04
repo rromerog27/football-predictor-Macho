@@ -551,6 +551,87 @@ def _render_count_stat_markets(historical_df: pd.DataFrame, home_team: str, away
         st.caption(f"⚠ {w}")
 
 
+def _render_half_time_markets(historical_df: pd.DataFrame, home_team: str, away_team: str) -> None:
+    """Mercados del primer tiempo, comparación entre mitades y mercado
+    combinado HT/FT. No muestra nada si el archivo no trae marcador al
+    descanso (HTHG/HTAG)."""
+    pred = poisson_model.predict_half_time(historical_df, home_team, away_team)
+    if pred is None:
+        return
+
+    st.markdown("---")
+    st.subheader("Medio tiempo (primer tiempo y HT/FT)")
+    st.caption(
+        f"Calculado sobre {pred.n_matches_with_ht} partidos con marcador al descanso. La segunda "
+        "mitad se deriva restando el descanso al marcador final, tratando cada mitad como un "
+        "proceso independiente."
+    )
+
+    g1, g2, g3 = st.columns(3)
+    g1.metric("Goles esperados 1er tiempo (total)", format_metric(pred.expected_total_ht))
+    g1.caption(f"{home_team}: {pred.expected_home_ht:.2f} · {away_team}: {pred.expected_away_ht:.2f}")
+    g2.metric("Goles esperados 2do tiempo (total)", format_metric(pred.expected_total_2h))
+    g2.caption(f"{home_team}: {pred.expected_home_2h:.2f} · {away_team}: {pred.expected_away_2h:.2f}")
+    top_ht_score, top_ht_prob = pred.top_scores_ht[0]
+    g3.metric("Marcador más probable al descanso", f"{top_ht_score} ({top_ht_prob:.1f}%)")
+
+    st.markdown("##### Resultado al descanso")
+    h1, h2, h3 = st.columns(3)
+    h1.metric(f"Gana {home_team}", format_pct(pred.prob_home_lead_ht))
+    h2.metric("Empate", format_pct(pred.prob_draw_ht))
+    h3.metric(f"Gana {away_team}", format_pct(pred.prob_away_lead_ht))
+
+    HIGH_PROB_THRESHOLD = 65.0
+    rows: list[dict] = []
+    for threshold in pred.prob_over:
+        rows.append({"Mercado": f"1er tiempo — Más de {threshold} goles", "Probabilidad (%)": pred.prob_over[threshold]})
+        rows.append({"Mercado": f"1er tiempo — Menos de {threshold} goles", "Probabilidad (%)": pred.prob_under[threshold]})
+    rows.extend(
+        [
+            {"Mercado": "1er tiempo — Ambos equipos anotan", "Probabilidad (%)": pred.prob_btts_ht_yes},
+            {"Mercado": "1er tiempo — Ambos equipos NO anotan", "Probabilidad (%)": pred.prob_btts_ht_no},
+            {"Mercado": "0-0 al descanso", "Probabilidad (%)": pred.prob_scoreless_ht},
+            {"Mercado": "Más goles en el 1er tiempo", "Probabilidad (%)": pred.prob_more_goals_first_half},
+            {"Mercado": "Más goles en el 2do tiempo", "Probabilidad (%)": pred.prob_more_goals_second_half},
+            {"Mercado": "Mismos goles en ambas mitades", "Probabilidad (%)": pred.prob_equal_halves},
+        ]
+    )
+    for row in rows:
+        if row["Probabilidad (%)"] >= HIGH_PROB_THRESHOLD:
+            row["Mercado"] = f"🔥 {row['Mercado']}"
+
+    market_df = pd.DataFrame(rows).sort_values("Probabilidad (%)", ascending=False, ignore_index=True)
+    st.dataframe(
+        market_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Probabilidad (%)": st.column_config.ProgressColumn(
+                "Probabilidad",
+                help=f"🔥 = probabilidad ≥ {HIGH_PROB_THRESHOLD:.0f}%.",
+                format="%.1f%%",
+                min_value=0,
+                max_value=100,
+            ),
+        },
+    )
+
+    col_matrix, col_htft = st.columns(2)
+    col_matrix.plotly_chart(
+        visualizations.score_matrix_heatmap(pred.score_matrix_ht, home_team, away_team),
+        use_container_width=True,
+    )
+    col_htft.plotly_chart(visualizations.ht_ft_heatmap(pred.ht_ft_matrix), use_container_width=True)
+    st.caption(
+        "En la matriz combinada, cada celda es la probabilidad de que el partido vaya de ese "
+        "resultado al descanso a ese resultado final (por ejemplo, empate al descanso y victoria "
+        "local al final). Las nueve celdas suman 100%."
+    )
+
+    for w in pred.warnings:
+        st.caption(f"⚠ {w}")
+
+
 def render_prediccion(
     historical_df: pd.DataFrame,
     home_team: str,
@@ -598,6 +679,7 @@ def render_prediccion(
         st.markdown("---")
         _render_goals_markets_and_matrix(poisson_pred, home_team, away_team)
         _render_count_stat_markets(historical_df, home_team, away_team)
+        _render_half_time_markets(historical_df, home_team, away_team)
 
         top_score, top_prob = poisson_pred.top_scores[0]
         explanation = (
@@ -672,6 +754,7 @@ def render_prediccion(
         st.markdown("---")
         _render_goals_markets_and_matrix(poisson_pred, home_team, away_team)
         _render_count_stat_markets(historical_df, home_team, away_team)
+        _render_half_time_markets(historical_df, home_team, away_team)
 
         top_score, top_prob = poisson_pred.top_scores[0]
         explanation = (

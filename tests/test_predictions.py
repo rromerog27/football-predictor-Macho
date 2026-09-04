@@ -179,6 +179,70 @@ def test_derive_thresholds_never_goes_below_half():
 
 
 # --------------------------------------------------------------------------
+# poisson_model.py — medio tiempo (1T, 2T y HT/FT)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def df_with_half_time(big_df) -> pd.DataFrame:
+    """Agrega marcador de medio tiempo coherente: los goles del descanso
+    son un subconjunto binomial de los goles totales del partido."""
+    rng = np.random.default_rng(11)
+    df = big_df.copy()
+    df["home_goals_ht"] = rng.binomial(df["home_goals"].astype(int), 0.45).astype(float)
+    df["away_goals_ht"] = rng.binomial(df["away_goals"].astype(int), 0.45).astype(float)
+    return df
+
+
+def test_predict_half_time_returns_none_without_ht_columns(big_df):
+    assert poisson_model.predict_half_time(big_df, "Team0", "Team1") is None
+
+
+def test_predict_half_time_probabilities_are_coherent(df_with_half_time):
+    pred = poisson_model.predict_half_time(df_with_half_time, "Team0", "Team1")
+    assert pred is not None
+
+    total_1x2 = pred.prob_home_lead_ht + pred.prob_draw_ht + pred.prob_away_lead_ht
+    assert total_1x2 == pytest.approx(100.0, abs=0.5)
+
+    halves = pred.prob_more_goals_first_half + pred.prob_more_goals_second_half + pred.prob_equal_halves
+    assert halves == pytest.approx(100.0, abs=0.5)
+
+    for threshold in pred.prob_over:
+        assert pred.prob_over[threshold] + pred.prob_under[threshold] == pytest.approx(100.0, abs=0.2)
+
+    assert pred.prob_btts_ht_yes + pred.prob_btts_ht_no == pytest.approx(100.0, abs=0.2)
+
+
+def test_predict_half_time_splits_goals_plausibly_between_halves(df_with_half_time):
+    """Los datos sintéticos ponen ~45% de los goles en el primer tiempo,
+    así que la proporción estimada debe quedar cerca de eso. Detectaría,
+    por ejemplo, que se hayan cruzado las columnas de descanso y final."""
+    pred = poisson_model.predict_half_time(df_with_half_time, "Team0", "Team1")
+    expected_full_time = pred.expected_total_ht + pred.expected_total_2h
+    first_half_share = pred.expected_total_ht / expected_full_time
+
+    assert pred.expected_home_2h > 0
+    assert pred.expected_away_2h > 0
+    assert 0.30 < first_half_share < 0.60
+
+
+def test_predict_half_time_ht_ft_matrix_sums_to_100(df_with_half_time):
+    pred = poisson_model.predict_half_time(df_with_half_time, "Team0", "Team1")
+    assert pred.ht_ft_matrix.shape == (3, 3)
+    assert float(pred.ht_ft_matrix.values.sum()) == pytest.approx(100.0, abs=0.5)
+
+
+def test_predict_half_time_reports_partial_ht_coverage(df_with_half_time):
+    partial = df_with_half_time.copy()
+    partial.loc[partial.index[:50], "home_goals_ht"] = np.nan
+    pred = poisson_model.predict_half_time(partial, "Team0", "Team1")
+    assert pred is not None
+    assert pred.n_matches_with_ht == len(partial) - 50
+    assert any("no trae marcador de medio tiempo" in w for w in pred.warnings)
+
+
+# --------------------------------------------------------------------------
 # poisson_model.py — backtest y split cronológico
 # --------------------------------------------------------------------------
 

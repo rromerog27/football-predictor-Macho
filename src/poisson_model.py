@@ -375,6 +375,290 @@ def predict_count_stat(df: pd.DataFrame, home_team: str, away_team: str, stat_ke
 
 
 # --------------------------------------------------------------------------
+# Medio tiempo: primer tiempo, segunda mitad y mercado HT/FT
+# --------------------------------------------------------------------------
+#
+# Usa las columnas de marcador al descanso (HTHG/HTAG en football-data.co.uk,
+# mapeadas a home_goals_ht/away_goals_ht) con el mismo motor de Poisson.
+#
+# Para la segunda mitad y el mercado HT/FT se modelan el primer y el segundo
+# tiempo como dos procesos de Poisson INDEPENDIENTES (goles de la 2ª mitad =
+# goles totales − goles del descanso). Es el supuesto estándar: en un proceso
+# de Poisson, los eventos en intervalos disjuntos son independientes entre sí.
+
+HT_MAX_GOALS_INTERNAL = 8
+HT_MAX_GOALS_DISPLAY = 4  # matriz de marcadores al descanso (0-4 x 0-4)
+HT_THRESHOLDS = (0.5, 1.5, 2.5)  # las líneas típicas del primer tiempo
+EXPECTED_HT_GOALS_MIN = 0.05
+EXPECTED_HT_GOALS_MAX = 4.0
+EXPECTED_SECOND_HALF_MIN = 0.05
+
+# Rango por equipo y por mitad usado para construir la matriz HT/FT.
+HT_FT_RANGE = 7
+
+
+@dataclass
+class HalfTimePrediction:
+    home_team: str
+    away_team: str
+    n_matches_with_ht: int
+    expected_home_ht: float
+    expected_away_ht: float
+    expected_total_ht: float
+    expected_home_2h: float
+    expected_away_2h: float
+    expected_total_2h: float
+    prob_home_lead_ht: float
+    prob_draw_ht: float
+    prob_away_lead_ht: float
+    prob_over: dict[float, float]
+    prob_under: dict[float, float]
+    prob_btts_ht_yes: float
+    prob_btts_ht_no: float
+    prob_scoreless_ht: float
+    prob_more_goals_first_half: float
+    prob_more_goals_second_half: float
+    prob_equal_halves: float
+    score_matrix_ht: pd.DataFrame
+    top_scores_ht: list[tuple[str, float]]
+    ht_ft_matrix: pd.DataFrame  # filas = resultado al descanso, columnas = resultado final (%)
+    home_matches_used: int
+    away_matches_used: int
+    confidence: str
+    warnings: list[str] = field(default_factory=list)
+
+
+def _ht_ft_probability_matrix(
+    expected_home_ht: float,
+    expected_away_ht: float,
+    expected_home_2h: float,
+    expected_away_2h: float,
+) -> np.ndarray:
+    """Matriz 3x3 de probabilidades combinadas (resultado al descanso ×
+    resultado final), tratando cada mitad como un Poisson independiente."""
+    rng = np.arange(HT_FT_RANGE)
+    p_home_1h = poisson.pmf(rng, expected_home_ht)
+    p_away_1h = poisson.pmf(rng, expected_away_ht)
+    p_home_2h = poisson.pmf(rng, expected_home_2h)
+    p_away_2h = poisson.pmf(rng, expected_away_2h)
+
+    matrix = np.zeros((3, 3))
+    for h1 in rng:
+        for a1 in rng:
+            p_first = p_home_1h[h1] * p_away_1h[a1]
+            if p_first < 1e-12:
+                continue
+            ht_idx = 0 if h1 > a1 else (1 if h1 == a1 else 2)
+            for h2 in rng:
+                for a2 in rng:
+                    p_second = p_home_2h[h2] * p_away_2h[a2]
+                    if p_second < 1e-12:
+                        continue
+                    full_home, full_away = h1 + h2, a1 + a2
+                    ft_idx = 0 if full_home > full_away else (1 if full_home == full_away else 2)
+                    matrix[ht_idx, ft_idx] += p_first * p_second
+
+    total = matrix.sum()
+    return matrix / total if total > 0 else matrix
+
+
+def predict_half_time(df: pd.DataFrame, home_team: str, away_team: str) -> HalfTimePrediction | None:
+    """Predicción del primer tiempo, la segunda mitad y el mercado HT/FT.
+
+    Devuelve `None` si el archivo no trae marcador de medio tiempo o no hay
+    ninguna fila con ese dato completo — nunca se inventa un valor.
+
+    Todo se calcula sobre el subconjunto de partidos que SÍ tienen marcador
+    al descanso, para que los goles de la segunda mitad (total − descanso)
+    sean coherentes entre sí.
+    """
+    home_col, away_col = "home_goals_ht", "away_goals_ht"
+    if home_col not in df.columns or away_col not in df.columns:
+        return None
+    if "home_goals" not in df.columns or "away_goals" not in df.columns:
+        return None
+
+    valid = df[[home_col, away_col, "home_goals", "away_goals"]].notna().all(axis=1)
+    ht_df = df[valid]
+    if ht_df.empty:
+        return None
+
+    warnings: list[str] = []
+    if len(ht_df) < len(df):
+        warnings.append(
+            f"Se usaron {len(ht_df)} de {len(df)} partidos: el resto no trae marcador de medio tiempo."
+        )
+
+    league_avg_home_ht, league_avg_away_ht = _league_averages(ht_df, home_col, away_col)
+    league_avg_home_ft, league_avg_away_ft = _league_averages(ht_df, "home_goals", "away_goals")
+    if (
+        pd.isna(league_avg_home_ht)
+        or pd.isna(league_avg_away_ht)
+        or league_avg_home_ht == 0
+        or league_avg_away_ht == 0
+    ):
+        return None
+
+    ht_home_attack, ht_home_defense = _team_home_attack_defense(
+        ht_df, home_team, league_avg_home_ht, league_avg_away_ht, home_col, away_col
+    )
+    ht_away_attack, ht_away_defense = _team_away_attack_defense(
+        ht_df, away_team, league_avg_home_ht, league_avg_away_ht, home_col, away_col
+    )
+    ft_home_attack, ft_home_defense = _team_home_attack_defense(
+        ht_df, home_team, league_avg_home_ft, league_avg_away_ft
+    )
+    ft_away_attack, ft_away_defense = _team_away_attack_defense(
+        ht_df, away_team, league_avg_home_ft, league_avg_away_ft
+    )
+
+    if ht_home_attack.used_fallback:
+        warnings.append(
+            f"'{home_team}' no tiene partidos como local con marcador de medio tiempo; "
+            "se usó el promedio general de la liga."
+        )
+    if ht_away_attack.used_fallback:
+        warnings.append(
+            f"'{away_team}' no tiene partidos como visitante con marcador de medio tiempo; "
+            "se usó el promedio general de la liga."
+        )
+
+    expected_home_ht = float(
+        np.clip(
+            ht_home_attack.attack * ht_away_defense.defense * league_avg_home_ht,
+            EXPECTED_HT_GOALS_MIN,
+            EXPECTED_HT_GOALS_MAX,
+        )
+    )
+    expected_away_ht = float(
+        np.clip(
+            ht_away_attack.attack * ht_home_defense.defense * league_avg_away_ht,
+            EXPECTED_HT_GOALS_MIN,
+            EXPECTED_HT_GOALS_MAX,
+        )
+    )
+    expected_home_ft = float(
+        np.clip(
+            ft_home_attack.attack * ft_away_defense.defense * league_avg_home_ft,
+            EXPECTED_GOALS_MIN,
+            EXPECTED_GOALS_MAX,
+        )
+    )
+    expected_away_ft = float(
+        np.clip(
+            ft_away_attack.attack * ft_home_defense.defense * league_avg_away_ft,
+            EXPECTED_GOALS_MIN,
+            EXPECTED_GOALS_MAX,
+        )
+    )
+
+    expected_home_2h = expected_home_ft - expected_home_ht
+    expected_away_2h = expected_away_ft - expected_away_ht
+    if expected_home_2h < EXPECTED_SECOND_HALF_MIN or expected_away_2h < EXPECTED_SECOND_HALF_MIN:
+        warnings.append(
+            "La estimación del primer tiempo quedó tan alta como la del partido completo para "
+            "algún equipo (muestra chica o datos irregulares): la segunda mitad se acotó a un "
+            "mínimo y debe tomarse con cautela."
+        )
+    expected_home_2h = max(EXPECTED_SECOND_HALF_MIN, expected_home_2h)
+    expected_away_2h = max(EXPECTED_SECOND_HALF_MIN, expected_away_2h)
+
+    # --- Mercados del primer tiempo, sobre la matriz de marcadores al descanso ---
+    ht_matrix = _score_probability_matrix(expected_home_ht, expected_away_ht, HT_MAX_GOALS_INTERNAL)
+    idx = np.arange(HT_MAX_GOALS_INTERNAL + 1)
+    home_idx, away_idx = np.meshgrid(idx, idx, indexing="ij")
+
+    prob_home_lead = float(ht_matrix[home_idx > away_idx].sum())
+    prob_draw_ht = float(ht_matrix[home_idx == away_idx].sum())
+    prob_away_lead = float(ht_matrix[home_idx < away_idx].sum())
+
+    totals = home_idx + away_idx
+    prob_over: dict[float, float] = {}
+    prob_under: dict[float, float] = {}
+    for threshold in HT_THRESHOLDS:
+        p_over = float(ht_matrix[totals > threshold].sum())
+        prob_over[threshold] = round(p_over * 100, 1)
+        prob_under[threshold] = round((1 - p_over) * 100, 1)
+
+    prob_home_scoreless = float(ht_matrix[home_idx == 0].sum())
+    prob_away_scoreless = float(ht_matrix[away_idx == 0].sum())
+    prob_scoreless_ht = float(ht_matrix[0, 0])
+    prob_btts_ht_yes = float(1 - prob_home_scoreless - prob_away_scoreless + prob_scoreless_ht)
+
+    display_size = HT_MAX_GOALS_DISPLAY + 1
+    score_matrix_ht = pd.DataFrame(
+        ht_matrix[:display_size, :display_size] * 100,
+        index=[str(i) for i in range(display_size)],
+        columns=[str(i) for i in range(display_size)],
+    )
+    flat_scores = [
+        (f"{h}-{a}", float(ht_matrix[h, a]))
+        for h in range(HT_MAX_GOALS_INTERNAL + 1)
+        for a in range(HT_MAX_GOALS_INTERNAL + 1)
+    ]
+    top_scores_ht = [
+        (score, round(p * 100, 1)) for score, p in sorted(flat_scores, key=lambda x: x[1], reverse=True)[:5]
+    ]
+
+    # --- ¿Qué mitad tendrá más goles? (suma de dos Poisson por mitad) ---
+    lambda_first = expected_home_ht + expected_away_ht
+    lambda_second = expected_home_2h + expected_away_2h
+    half_counts = np.arange(0, 16)
+    p_first_half = poisson.pmf(half_counts, lambda_first)
+    p_second_half = poisson.pmf(half_counts, lambda_second)
+    halves_joint = np.outer(p_first_half, p_second_half)
+    first_idx, second_idx = np.meshgrid(half_counts, half_counts, indexing="ij")
+    prob_more_first = float(halves_joint[first_idx > second_idx].sum())
+    prob_more_second = float(halves_joint[first_idx < second_idx].sum())
+    prob_equal_halves = float(halves_joint[first_idx == second_idx].sum())
+
+    # --- Mercado combinado HT/FT ---
+    ht_ft = _ht_ft_probability_matrix(expected_home_ht, expected_away_ht, expected_home_2h, expected_away_2h)
+    ht_ft_matrix = pd.DataFrame(
+        ht_ft * 100,
+        index=[f"HT: {home_team}", "HT: Empate", f"HT: {away_team}"],
+        columns=[f"FT: {home_team}", "FT: Empate", f"FT: {away_team}"],
+    )
+
+    confidence = _classify_confidence(ht_home_attack.matches_used, ht_away_attack.matches_used)
+    if confidence == "baja":
+        warnings.append(
+            "Confianza baja para el medio tiempo: pocos partidos con marcador al descanso para "
+            "uno o ambos equipos."
+        )
+
+    return HalfTimePrediction(
+        home_team=home_team,
+        away_team=away_team,
+        n_matches_with_ht=len(ht_df),
+        expected_home_ht=round(expected_home_ht, 2),
+        expected_away_ht=round(expected_away_ht, 2),
+        expected_total_ht=round(expected_home_ht + expected_away_ht, 2),
+        expected_home_2h=round(expected_home_2h, 2),
+        expected_away_2h=round(expected_away_2h, 2),
+        expected_total_2h=round(expected_home_2h + expected_away_2h, 2),
+        prob_home_lead_ht=round(prob_home_lead * 100, 1),
+        prob_draw_ht=round(prob_draw_ht * 100, 1),
+        prob_away_lead_ht=round(prob_away_lead * 100, 1),
+        prob_over=prob_over,
+        prob_under=prob_under,
+        prob_btts_ht_yes=round(prob_btts_ht_yes * 100, 1),
+        prob_btts_ht_no=round((1 - prob_btts_ht_yes) * 100, 1),
+        prob_scoreless_ht=round(prob_scoreless_ht * 100, 1),
+        prob_more_goals_first_half=round(prob_more_first * 100, 1),
+        prob_more_goals_second_half=round(prob_more_second * 100, 1),
+        prob_equal_halves=round(prob_equal_halves * 100, 1),
+        score_matrix_ht=score_matrix_ht,
+        top_scores_ht=top_scores_ht,
+        ht_ft_matrix=ht_ft_matrix,
+        home_matches_used=ht_home_attack.matches_used,
+        away_matches_used=ht_away_attack.matches_used,
+        confidence=confidence,
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------------
 # Backtest (evaluación en un split cronológico train/test)
 # --------------------------------------------------------------------------
 #

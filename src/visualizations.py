@@ -240,6 +240,26 @@ def confusion_matrix_heatmap(matrix: list[list[int]], labels: list[str], title: 
     return fig
 
 
+def ht_ft_heatmap(matrix: pd.DataFrame) -> go.Figure:
+    """Mapa de calor del mercado combinado medio tiempo / final: filas =
+    quién gana al descanso, columnas = quién gana al final (en %)."""
+    fig = px.imshow(
+        matrix,
+        labels=dict(x="Resultado final", y="Resultado al descanso", color="Probabilidad (%)"),
+        x=matrix.columns,
+        y=matrix.index,
+        color_continuous_scale="Blues",
+        text_auto=".1f",
+        aspect="auto",
+    )
+    fig.update_layout(
+        title="Mercado combinado: medio tiempo / final",
+        template=TEMPLATE,
+        margin=dict(t=60, b=40, l=40, r=20),
+    )
+    return fig
+
+
 def top_scores_bar(top_scores: list[tuple[str, float]]) -> go.Figure:
     """Barra horizontal con los marcadores exactos más probables."""
     scores = [s for s, _ in top_scores][::-1]
