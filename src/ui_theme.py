@@ -242,8 +242,11 @@ def stat_card(icon: str, label: str, value: str, accent: str = "blue") -> str:
 def stat_row(cards: list[dict]) -> str:
     """Fila de tarjetas de estadísticas (KPI row). Cada elemento de `cards`:
     {"icon": "📁", "label": "Archivos cargados", "value": "3", "accent": "blue"}."""
+    # `.strip()` quita la línea en blanco final de cada tarjeta: en Markdown, una
+    # línea en blanco cierra el bloque HTML y la tarjeta siguiente (indentada)
+    # se mostraría como bloque de código.
     cards_html = "".join(
-        stat_card(c["icon"], c["label"], c["value"], c.get("accent", "blue")) for c in cards
+        stat_card(c["icon"], c["label"], c["value"], c.get("accent", "blue")).strip() for c in cards
     )
     return f'<div class="fp-stat-row">{cards_html}</div>'
 

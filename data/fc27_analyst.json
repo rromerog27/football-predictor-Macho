@@ -1,0 +1,40 @@
+{
+  "_comment": "Calendario y notas manuales del analista para la sección FC 27 Mercado. Fechas en UTC (ISO 8601). status: CONFIRMADO, ALTA, MEDIA, BAJA o RUMOR. type 'promo' activa la regla de 'promo en menos de 48h'. Las notas desaparecen solas al pasar su fecha 'expires'.",
+  "updated": "2026-10-01T21:30:00Z",
+  "events": [
+    {"when": "2026-10-01T15:00:00Z", "type": "sbc", "label": "SBC POTM Bundesliga (Olise 91) y Serie A (Malen 85)", "status": "CONFIRMADO", "source": "FUT.GG"},
+    {"when": "2026-10-02T17:00:00Z", "type": "promo", "label": "Destined for Glory Team 2 (Haaland 91 filtrado)", "status": "ALTA", "source": "Insider Gaming, RealSport101"},
+    {"when": "2026-10-02T17:00:00Z", "type": "sbc", "label": "Expiran los SBC TOTW Upgrade y Antonio Nusa", "status": "CONFIRMADO", "source": "FUT.GG"},
+    {"when": "2026-10-06T17:00:00Z", "type": "other", "label": "Termina la ventana internacional; vuelven las ligas", "status": "CONFIRMADO", "source": "Calendario FIFA"},
+    {"when": "2026-10-07T17:00:00Z", "type": "totw", "label": "TOTW 4; el TOTW 3 sale de packs", "status": "ALTA", "source": "Ciclo semanal de EA"},
+    {"when": "2026-10-09T17:00:00Z", "type": "promo", "label": "Future Stars", "status": "MEDIA", "source": "Dexerto (fecha esperada)"},
+    {"when": "2026-10-22T17:00:00Z", "type": "season", "label": "Fin de la Season 1; empieza la Season 2", "status": "CONFIRMADO", "source": "EA SPORTS"},
+    {"when": "2026-10-29T15:00:00Z", "type": "sbc", "label": "Expiran los SBC POTM de septiembre", "status": "CONFIRMADO", "source": "FUT.GG"}
+  ],
+  "notes": [
+    {
+      "created": "2026-10-01T21:30:00Z",
+      "expires": "2026-10-08T21:30:00Z",
+      "player": "Michael Olise TOTW 91",
+      "signal": "RIESGO",
+      "thesis": "Olise POTM 91 (SBC, ~565k en consola) tiene stats casi idénticas (84/83/90/92/48/70 frente a 84/84/90/92/48/71). La TOTW se pagaba a ~920k.",
+      "invalidation": "Se mantiene por encima de 900k durante 48h."
+    },
+    {
+      "created": "2026-10-01T21:30:00Z",
+      "expires": "2026-10-05T17:00:00Z",
+      "player": "Erling Haaland base 91",
+      "signal": "VIGILAR",
+      "thesis": "Sale su versión DFG 91 con stats casi iguales. Posible caída temporal de la base el fin de semana.",
+      "invalidation": "No baja de 108k tras la salida de DFG Team 2."
+    },
+    {
+      "created": "2026-10-01T21:30:00Z",
+      "expires": "2026-10-04T17:00:00Z",
+      "player": "Mohamed Salah TOTW 88",
+      "signal": "VIGILAR",
+      "thesis": "Fuera de packs; el SBC TOTW Upgrade (premio TOTW 1-2) deja de meter oferta el 2 oct a las 17:00 UTC.",
+      "invalidation": "Rompe 130k o sale una versión nueva de Salah."
+    }
+  ]
+}
