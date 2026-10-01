@@ -109,7 +109,10 @@ Se abrirá automáticamente en el navegador (por defecto en
 ```
 football_predictor/
 │
-├── app.py                    # Punto de entrada del dashboard (Streamlit)
+├── app.py                    # Punto de entrada: configuración y navegación entre páginas
+├── views/
+│   ├── fc27_mercado.py       # Página Mercado FC 27
+│   └── predictor.py          # Página Predictor de partidos
 ├── requirements.txt          # Dependencias del proyecto
 ├── README.md                 # Este archivo
 │
@@ -144,7 +147,8 @@ football_predictor/
 
 | Archivo | Responsabilidad |
 |---|---|
-| `app.py` | Orquesta el dashboard: sidebar, pestañas, y llama a las funciones de `src/` para mostrar resultados. No contiene lógica de negocio. |
+| `app.py` | Punto de entrada: configuración común y navegación (`st.navigation`) entre las dos páginas. |
+| `views/predictor.py` | Página del predictor: sidebar, pestañas, y llama a las funciones de `src/` para mostrar resultados. No contiene lógica de negocio. |
 | `src/data_loader.py` | Lee archivos Excel/CSV, lista hojas de Excel, descarta columnas de cuotas de apuestas cuando detecta el formato football-data.co.uk, y genera el resumen técnico del archivo (filas, columnas, faltantes, duplicados). |
 | `src/column_mapper.py` | Detecta automáticamente qué columna del archivo corresponde a cada campo canónico (equipo local, goles, fecha, etc.), con nombres alternativos como respaldo. Infiere la temporada a partir de las fechas y detecta la competición cuando hay un único valor. |
 | `src/data_cleaner.py` | Limpia strings, convierte fechas y columnas numéricas, detecta valores imposibles, elimina duplicados, separa partidos jugados de partidos pendientes y ordena cronológicamente. |
@@ -159,8 +163,15 @@ football_predictor/
 
 ## Sección FC 27 Mercado
 
-Página `pages/1_FC27_Mercado.py`, accesible desde el menú de la barra lateral
-("FC27 Mercado") al ejecutar `streamlit run app.py`.
+Página `views/fc27_mercado.py`. Es la página que se abre por defecto al
+ejecutar `streamlit run app.py` ("Mercado FC 27" en el menú lateral).
+
+Orden de la página: **Resumen de hoy** (mejor compra, mayor riesgo y próximo
+evento), alertas críticas y las pestañas Señales, **⭐ Mi lista** (cartas que
+sigues, con su cambio desde que las añadiste, neto del 5% de EA), Mercado
+(selecciona una fila para ver la ficha y el gráfico de precio), Fodder y SBC,
+Alertas y Cómo funciona. El selector **Tu presupuesto** de la barra lateral
+filtra el resumen, las señales y el mercado.
 
 **Qué hace al abrirla:**
 
@@ -200,7 +211,7 @@ regla de "promo próxima" en las puntuaciones.
 | `src/fc27_market.py` | Descarga y lee las páginas de FUT.GG; tabla de coste por punto de Item Score del fodder. |
 | `src/fc27_history.py` | Historial SQLite: instantáneas, variaciones por ventana, registro y evaluación de señales (con el 5% de impuesto de EA). |
 | `src/fc27_signals.py` | Reglas de Market Score, Risk Score, señales, plan de operación, estado del mercado y alertas. |
-| `pages/1_FC27_Mercado.py` | La página de Streamlit. |
+| `views/fc27_mercado.py` | La página de Streamlit. |
 | `scripts/fc27_snapshot.py` | Guarda una instantánea desde la línea de comandos. |
 | `data/fc27_analyst.json` | Calendario y notas mantenidos a mano. |
 

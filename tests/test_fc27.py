@@ -178,7 +178,7 @@ def test_sbc_substitute_flags_more_expensive_card(snap):
     olise = signals[signals["name"] == "Michael Olise"].iloc[0]
     assert olise["utility"] == 0
     assert olise["signal"] == "RIESGO"
-    assert any(r.startswith("Sustituto") for r in olise["risks"])
+    assert olise["risks"][0].startswith("Sustituto")  # el riesgo más fuerte va primero
 
 
 def test_parabolic_rise_raises_risk(snap):
@@ -235,3 +235,18 @@ def test_fodder_table_ignores_single_outlier_listing():
     table = fc27_market.fodder_table(pd.DataFrame(rows))
     assert table.iloc[0]["min_price"] == 2000
     assert table.iloc[0]["price"] == 3900
+
+
+def test_watchlist_tracks_price_since_added():
+    conn = fc27_history.connect(":memory:")
+    fc27_history.save_snapshot(conn, _snap_at(NOW, 100_000))
+    card = {"ea_id": 7, "name": "Test", "overall": 88, "rarity": "Team of the week", "price": 100_000}
+    assert fc27_history.add_to_watchlist(conn, card, NOW)
+    assert not fc27_history.add_to_watchlist(conn, card, NOW)  # no se duplica
+    fc27_history.save_snapshot(conn, _snap_at(NOW + timedelta(hours=2), 110_000))
+    wl = fc27_history.watchlist(conn).iloc[0]
+    assert wl["last_price"] == 110_000
+    assert wl["pct_since_added"] == pytest.approx(10.0)
+    assert wl["net_if_sold_pct"] == pytest.approx(4.5)  # 110.000 × 0,95 / 100.000 − 1
+    fc27_history.remove_from_watchlist(conn, 7)
+    assert fc27_history.watchlist_ids(conn) == set()

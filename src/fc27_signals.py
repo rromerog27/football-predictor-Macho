@@ -282,7 +282,8 @@ def score_movers(
         utility = round(_clamp(15 * fodder_value / r.price, 0, 15)) if fodder_value else 2
         if has_substitute:
             utility = 0
-            risks.append(f"Sustituto: '{sub[2]}' da {r.name} {sub[0]} por ~{sub[1]:,} monedas.".replace(",", "."))
+            # El sustituto es el riesgo más fuerte: va primero para que lo vea quien lea solo una línea.
+            risks.insert(0, f"Sustituto: '{sub[2]}' da {r.name} {sub[0]} por ~{sub[1]:,} monedas.".replace(",", "."))
 
         # Risk score (0-100)
         risk = 25

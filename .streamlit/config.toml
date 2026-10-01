@@ -1,0 +1,7 @@
+# Configuración compartida de la app (los secretos van en secrets.toml, que está en .gitignore).
+[theme]
+primaryColor = "#1D4ED8"
+
+[client]
+# Menú de Streamlit reducido: sin opciones de desarrollador para el usuario final.
+toolbarMode = "minimal"

@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS sbcs (
     award_ea_id INTEGER, award_name TEXT, award_overall INTEGER,
     award_rarity TEXT, award_untradeable INTEGER
 );
+CREATE TABLE IF NOT EXISTS watchlist (
+    ea_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    overall INTEGER, rarity TEXT, url TEXT,
+    added_at TEXT NOT NULL,
+    added_price INTEGER
+);
 CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
@@ -187,6 +194,56 @@ def price_changes(conn: sqlite3.Connection, now: datetime, windows_h: tuple[int,
         merged = current.merge(past, on="ea_id", how="left")
         current[f"pct_{w}h"] = ((merged["price_now"] / merged["price"] - 1) * 100).round(2).values
     return current[out_cols].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Mi lista (cartas que el usuario sigue)
+# ---------------------------------------------------------------------------
+
+
+def add_to_watchlist(conn: sqlite3.Connection, card: dict, now: datetime) -> bool:
+    """Añade una carta a "Mi lista". `card` necesita ea_id, name y price;
+    overall, rarity y url son opcionales. Devuelve False si ya estaba."""
+    with conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO watchlist(ea_id, name, overall, rarity, url, added_at, added_price) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (int(card["ea_id"]), card["name"], _int_or_none(card.get("overall")), card.get("rarity"),
+             card.get("url"), _iso(now), _int_or_none(card.get("price"))),
+        )
+    return cur.rowcount == 1
+
+
+def remove_from_watchlist(conn: sqlite3.Connection, ea_id: int) -> None:
+    with conn:
+        conn.execute("DELETE FROM watchlist WHERE ea_id = ?", (int(ea_id),))
+
+
+def watchlist_ids(conn: sqlite3.Connection) -> set[int]:
+    return {row[0] for row in conn.execute("SELECT ea_id FROM watchlist")}
+
+
+def watchlist(conn: sqlite3.Connection) -> pd.DataFrame:
+    """Cartas de "Mi lista" con su último precio guardado.
+
+    Columnas: ea_id, name, overall, rarity, url, added_at, added_price,
+    last_price, last_seen, pct_since_added (bruto) y net_if_sold_pct (vender
+    ahora, tras el 5% de EA).
+    """
+    df = pd.read_sql_query(
+        "SELECT w.*, "
+        " (SELECT MIN(p.price) FROM prices p WHERE p.ea_id = w.ea_id AND p.snapshot_id = "
+        "   (SELECT MAX(p2.snapshot_id) FROM prices p2 WHERE p2.ea_id = w.ea_id)) AS last_price, "
+        " (SELECT s.fetched_at FROM snapshots s WHERE s.id = "
+        "   (SELECT MAX(p3.snapshot_id) FROM prices p3 WHERE p3.ea_id = w.ea_id)) AS last_seen "
+        "FROM watchlist w ORDER BY w.added_at DESC",
+        conn,
+    )
+    added = pd.to_numeric(df["added_price"], errors="coerce")
+    last = pd.to_numeric(df["last_price"], errors="coerce")
+    df["pct_since_added"] = ((last / added - 1) * 100).round(2)
+    df["net_if_sold_pct"] = ((last * (1 - EA_TAX) / added - 1) * 100).round(2)
+    return df
 
 
 # ---------------------------------------------------------------------------
