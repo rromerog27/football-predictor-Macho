@@ -9,3 +9,6 @@ models/*.joblib
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Historial local del mercado de FC 27 (se genera solo al usar la sección FC 27 Mercado).
+data/fc27_market.sqlite

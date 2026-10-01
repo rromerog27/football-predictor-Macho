@@ -8,6 +8,11 @@ estadísticas de un partido mediante un modelo de distribución de Poisson.
 No se consulta internet, rankings, lesiones, alineaciones ni datos
 históricos externos.
 
+La app incluye además una sección independiente, **FC 27 Mercado**, que sí
+usa internet: descarga datos en vivo de FUT.GG para buscar oportunidades de
+trading en EA SPORTS FC 27 Ultimate Team (ver "Sección FC 27 Mercado" más
+abajo). No comparte datos con el predictor de partidos.
+
 ## Estado actual: Fase 3 — Exportación (completa)
 
 Implementado hasta ahora:
@@ -131,7 +136,8 @@ football_predictor/
     ├── test_statistics.py      # Pruebas de cálculo de estadísticas
     ├── test_predictions.py     # Pruebas de feature engineering, regresión logística y combinación
     ├── test_reports.py         # Pruebas de exportación (CSV/Excel/HTML)
-    └── test_market_odds.py     # Pruebas de probabilidad implícita y simulación de apuestas de valor
+    ├── test_market_odds.py     # Pruebas de probabilidad implícita y simulación de apuestas de valor
+    └── test_fc27.py            # Pruebas de la sección FC 27 Mercado (lectura, historial, señales)
 ```
 
 ### Para qué sirve cada archivo
@@ -150,6 +156,57 @@ football_predictor/
 | `src/market_odds.py` | Convierte cuotas 1X2 a probabilidad implícita (quitando el margen de la casa), evalúa qué tan bien predice el mercado los partidos de prueba, y simula en retrospectiva una estrategia de apuestas de valor comparando el modelo contra el mercado. |
 | `src/visualizations.py` | Construye los gráficos Plotly (barras, radar, evolución de forma, mapas de calor, importancia de variables) a partir de datos ya calculados. |
 | `src/utils.py` | Funciones auxiliares compartidas: división segura, formateo de porcentajes/métricas, logging, semilla aleatoria y umbrales de suficiencia de datos. |
+
+## Sección FC 27 Mercado
+
+Página `pages/1_FC27_Mercado.py`, accesible desde el menú de la barra lateral
+("FC27 Mercado") al ejecutar `streamlit run app.py`.
+
+**Qué hace al abrirla:**
+
+1. Descarga de FUT.GG las ~280 cartas con más movimiento en 24h, las cartas
+   más baratas por rating (fodder) y los SBC activos (puntos exigidos, coste
+   en consola y PC, fecha de fin y carta de premio). Reutiliza la descarga
+   durante ~10 minutos; el botón **Actualizar ahora** fuerza una nueva y el
+   interruptor **Actualizar sola cada 10 min** la repite mientras la página
+   esté abierta.
+2. Guarda una instantánea en `data/fc27_market.sqlite` (máximo una cada 10
+   minutos; el archivo no se versiona).
+3. Calcula para cada carta el **Market Score** (0-100), el **Risk Score**
+   (0-100) y una señal **COMPRAR / VIGILAR / RIESGO**, con zona de compra,
+   objetivo e invalidación.
+4. Muestra alertas (SBC nuevos o por expirar, subidas verticales, sustitutos
+   más baratos por SBC, caídas fuertes en 1h) y el calendario.
+
+Si FUT.GG no responde, se muestra la última instantánea guardada con su
+antigüedad.
+
+**Historial y calibración.** Las variaciones de 1h, 6h, 3 días y 7 días, y la
+tasa de acierto de las señales, se calculan con el historial propio, así que
+aparecen a medida que se acumulan instantáneas. Para que crezca sin abrir la
+app, programa el script (cron, o el Programador de tareas en Windows):
+
+```bash
+python scripts/fc27_snapshot.py      # una instantánea; pensado para cada 30 min
+```
+
+**Calendario y notas del analista.** Las fechas de promos, rumores y tesis
+manuales viven en `data/fc27_analyst.json`. Las notas desaparecen solas al
+pasar su fecha `expires`; un evento de tipo `promo` a menos de 48h activa la
+regla de "promo próxima" en las puntuaciones.
+
+| Archivo | Responsabilidad |
+|---|---|
+| `src/fc27_market.py` | Descarga y lee las páginas de FUT.GG; tabla de coste por punto de Item Score del fodder. |
+| `src/fc27_history.py` | Historial SQLite: instantáneas, variaciones por ventana, registro y evaluación de señales (con el 5% de impuesto de EA). |
+| `src/fc27_signals.py` | Reglas de Market Score, Risk Score, señales, plan de operación, estado del mercado y alertas. |
+| `pages/1_FC27_Mercado.py` | La página de Streamlit. |
+| `scripts/fc27_snapshot.py` | Guarda una instantánea desde la línea de comandos. |
+| `data/fc27_analyst.json` | Calendario y notas mantenidos a mano. |
+
+Las señales son heurísticas: el Market Score es un indicador comparativo, no
+una probabilidad de ganar. FUTBIN no se usa porque bloquea las peticiones
+automáticas.
 
 ## Formato de archivo esperado
 
