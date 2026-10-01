@@ -85,7 +85,21 @@ def connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
+
+
+# Columnas añadidas después de la primera versión del historial. Se agregan a
+# bases ya existentes sin perder datos.
+_WATCHLIST_EXTRA_COLUMNS = {"buy_price_pc": "INTEGER", "price_pc": "INTEGER", "price_pc_at": "TEXT"}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(watchlist)")}
+    with conn:
+        for col, kind in _WATCHLIST_EXTRA_COLUMNS.items():
+            if col not in existing:
+                conn.execute(f"ALTER TABLE watchlist ADD COLUMN {col} {kind}")
 
 
 def last_snapshot_time(conn: sqlite3.Connection) -> datetime | None:
@@ -223,12 +237,47 @@ def watchlist_ids(conn: sqlite3.Connection) -> set[int]:
     return {row[0] for row in conn.execute("SELECT ea_id FROM watchlist")}
 
 
+def set_pc_prices(conn: sqlite3.Connection, ea_id: int, buy_price_pc, price_pc, now: datetime) -> None:
+    """Guarda los precios de PC que introduce el usuario (FUT.GG no los publica
+    de forma abierta): a cuánto la compró y cuánto vale ahora en PC."""
+    with conn:
+        conn.execute(
+            "UPDATE watchlist SET buy_price_pc = ?, price_pc = ?, price_pc_at = ? WHERE ea_id = ?",
+            (_int_or_none(buy_price_pc), _int_or_none(price_pc), _iso(now), int(ea_id)),
+        )
+
+
+def pc_trade_math(buy_price, current_price) -> dict[str, float | None]:
+    """Cuentas de una operación con el 5% de impuesto de EA.
+
+    - break_even: precio de venta mínimo para no perder (compra / 0,95).
+    - target: venta que deja +10% neto (compra × 1,10 / 0,95).
+    - stop: precio a partir del cual la tesis se invalida (compra × 0,90).
+    - net_now / net_now_pct: lo que ganas o pierdes si vendes ya al precio actual.
+    """
+    out = {"break_even": None, "target": None, "stop": None, "net_now": None, "net_now_pct": None}
+    if buy_price is None or pd.isna(buy_price) or buy_price <= 0:
+        return out
+    out["break_even"] = round(buy_price / (1 - EA_TAX))
+    out["target"] = round(buy_price * 1.10 / (1 - EA_TAX))
+    out["stop"] = round(buy_price * 0.90)
+    if current_price is not None and not pd.isna(current_price) and current_price > 0:
+        net = current_price * (1 - EA_TAX) - buy_price
+        out["net_now"] = round(net)
+        out["net_now_pct"] = round(net / buy_price * 100, 2)
+    return out
+
+
 def watchlist(conn: sqlite3.Connection) -> pd.DataFrame:
     """Cartas de "Mi lista" con su último precio guardado.
 
     Columnas: ea_id, name, overall, rarity, url, added_at, added_price,
-    last_price, last_seen, pct_since_added (bruto) y net_if_sold_pct (vender
-    ahora, tras el 5% de EA).
+    last_price, last_seen, pct_since_added (bruto), net_if_sold_pct (vender
+    ahora, tras el 5% de EA), los precios de PC del usuario (buy_price_pc,
+    price_pc, price_pc_at) y sus cuentas: pc_break_even, pc_target, pc_stop,
+    pc_net_now, pc_net_now_pct.
+
+    `last_price` es de consola (lo único que FUT.GG publica abiertamente).
     """
     df = pd.read_sql_query(
         "SELECT w.*, "
@@ -243,6 +292,9 @@ def watchlist(conn: sqlite3.Connection) -> pd.DataFrame:
     last = pd.to_numeric(df["last_price"], errors="coerce")
     df["pct_since_added"] = ((last / added - 1) * 100).round(2)
     df["net_if_sold_pct"] = ((last * (1 - EA_TAX) / added - 1) * 100).round(2)
+    math = [pc_trade_math(b, c) for b, c in zip(df["buy_price_pc"], df["price_pc"])]
+    for key in ("break_even", "target", "stop", "net_now", "net_now_pct"):
+        df[f"pc_{key}"] = [m[key] for m in math]
     return df
 
 

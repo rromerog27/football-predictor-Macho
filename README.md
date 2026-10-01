@@ -192,6 +192,18 @@ filtra el resumen, las señales y el mercado.
 Si FUT.GG no responde, se muestra la última instantánea guardada con su
 antigüedad.
 
+**PC y consola.** FUT.GG solo publica abiertamente precios de cartas de
+**consola**; sus precios de PC pasan por un servicio protegido contra
+descargas automáticas, que la app no intenta saltarse. Por eso:
+
+- Los precios de cartas se muestran marcados como "(consola)".
+- Con **Tu plataforma: PC** (por defecto) la tabla de SBC muestra primero el
+  coste en PC, que FUT.GG sí publica.
+- En **⭐ Mi lista** apuntas a cuánto compraste cada carta en PC y cuánto vale
+  ahora; la app calcula el precio para no perder (compra / 0,95), el objetivo
+  (+10% neto), la invalidación (−10%) y el beneficio neto si vendes ya, todo
+  con el 5% de impuesto de EA.
+
 **Historial y calibración.** Las variaciones de 1h, 6h, 3 días y 7 días, y la
 tasa de acierto de las señales, se calculan con el historial propio, así que
 aparecen a medida que se acumulan instantáneas. Para que crezca sin abrir la
