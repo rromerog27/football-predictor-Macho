@@ -181,7 +181,7 @@ def render_today(signals: pd.DataFrame, events: pd.DataFrame, now: datetime) -> 
         else:
             r = buy.iloc[0]
             plan = fc27_signals.trade_plan(r)
-            body = (f"<div class='n'>{html.escape(_card_title(r))}</div><div class='p'>{_fmt(r['price'])} monedas</div>"
+            body = (f"<div class='n'>{html.escape(_card_title(r))}</div><div class='p'>{_fmt(r['price'])} monedas <span style='font-size:.75rem;font-weight:500'>(consola)</span></div>"
                     f"<div class='d'>Comprar: {html.escape(plan['zona'])}<br>Objetivo: {html.escape(plan['objetivo'])}"
                     f"<br>Market Score {int(r['market_score'])} · Riesgo {int(r['risk_score'])}</div>")
         st.markdown(f"<div class='fc-hero buy'><div class='k'>Mejor compra</div>{body}</div>", unsafe_allow_html=True)
@@ -192,7 +192,7 @@ def render_today(signals: pd.DataFrame, events: pd.DataFrame, now: datetime) -> 
         else:
             r = risk.iloc[0]
             why = (r["risks"] or r["reasons"] or ["Risk Score alto."])[0]
-            body = (f"<div class='n'>{html.escape(_card_title(r))}</div><div class='p'>{_fmt(r['price'])} monedas "
+            body = (f"<div class='n'>{html.escape(_card_title(r))}</div><div class='p'>{_fmt(r['price'])} monedas (consola) "
                     f"{_pct_html(r['pct_24h'])}</div><div class='d'>{html.escape(why)}</div>")
         st.markdown(f"<div class='fc-hero risk'><div class='k'>Mayor riesgo</div>{body}</div>", unsafe_allow_html=True)
     with c3:
@@ -222,7 +222,8 @@ def _signal_card(conn, row: pd.Series, followed: set[int], kind: str) -> None:
             f"<span class='fc-pill {css}'>{label}</span></div>",
             unsafe_allow_html=True,
         )
-        st.markdown(f"**{_fmt(row['price'])}** monedas &nbsp; 24h {_pct_html(row['pct_24h'])}", unsafe_allow_html=True)
+        st.markdown(f"**{_fmt(row['price'])}** monedas (consola) &nbsp; 24h {_pct_html(row['pct_24h'])}",
+                    unsafe_allow_html=True)
         c1, c2 = st.columns(2)
         c1.progress(int(row["market_score"]) / 100, text=f"Market {int(row['market_score'])}")
         c2.progress(int(row["risk_score"]) / 100, text=f"Riesgo {int(row['risk_score'])}")
@@ -279,43 +280,81 @@ def render_signals(conn, signals: pd.DataFrame, evaluated: pd.DataFrame, analyst
                             unsafe_allow_html=True)
 
 
-def render_watchlist(conn, signals: pd.DataFrame) -> None:
+def render_watchlist(conn, signals: pd.DataFrame, platform: str) -> None:
     wl = fc27_history.watchlist(conn)
     if wl.empty:
         st.info("Tu lista está vacía. Pulsa **☆ Seguir** en una señal, o selecciona una carta en la pestaña "
-                "**Mercado** y añádela. Aquí verás cuánto ha subido o bajado desde que la añadiste, ya con el 5% "
-                "de impuesto de EA descontado.")
+                "**Mercado** y añádela. Aquí apuntas tus precios de PC y la app te calcula el precio para no perder, "
+                "el objetivo y el beneficio real tras el 5% de EA.")
         return
     current = signals.drop_duplicates("ea_id").set_index("ea_id")
     wl["signal"] = wl["ea_id"].map(current["signal"]).fillna("—")
     wl["link"] = FUTGG + wl["url"].fillna("")
-    wl["added"] = pd.to_datetime(wl["added_at"], utc=True)
-    st.caption("Precio de la última instantánea en la que apareció cada carta. Si una carta deja de estar entre las "
-               "que más se mueven en FUT.GG, su precio deja de actualizarse.")
-    event = st.dataframe(
-        wl[["name", "overall", "rarity", "added_price", "last_price", "pct_since_added", "net_if_sold_pct",
-            "signal", "added", "link"]],
-        hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="wl_table",
+
+    st.markdown("##### Tus precios de PC")
+    st.caption("FUT.GG no publica precios de cartas en PC de forma abierta. Apunta aquí a cuánto compraste cada carta "
+               "en PC y cuánto vale ahora (lo ves en el juego o en FUT.GG); la app calcula el resto con el 5% de EA.")
+    labels = {f"{r['name']} {'' if pd.isna(r['overall']) else int(r['overall'])}".strip(): r for _, r in wl.iterrows()}
+    with st.form("pc_prices_form", border=True):
+        c1, c2, c3, c4 = st.columns([2.2, 1.3, 1.3, 1])
+        choice = c1.selectbox("Carta", list(labels), key="pc_card")
+        row = labels[choice]
+        buy = c2.number_input("Compré a (PC)", min_value=0, step=500, key=f"pc_buy_{row['ea_id']}",
+                              value=None if pd.isna(row["buy_price_pc"]) else int(row["buy_price_pc"]),
+                              placeholder="Ej. 150000")
+        now_price = c3.number_input("Vale ahora (PC)", min_value=0, step=500, key=f"pc_now_{row['ea_id']}",
+                                    value=None if pd.isna(row["price_pc"]) else int(row["price_pc"]),
+                                    placeholder="Ej. 171000")
+        c4.write("")
+        if c4.form_submit_button("Guardar", type="primary", width="stretch"):
+            fc27_history.set_pc_prices(conn, int(row["ea_id"]), buy, now_price, datetime.now(timezone.utc))
+            st.toast(f"Precios de PC guardados para {choice}", icon="💾")
+            st.rerun()
+
+    st.dataframe(
+        wl[["name", "overall", "buy_price_pc", "price_pc", "pc_net_now", "pc_net_now_pct", "pc_break_even",
+            "pc_target", "pc_stop", "signal"]],
+        hide_index=True, width="stretch",
         column_config={
-            "name": "Carta", "overall": st.column_config.NumberColumn("OVR", format="%d"), "rarity": "Rareza",
-            "added_price": st.column_config.NumberColumn("Precio al añadir", format="localized"),
-            "last_price": st.column_config.NumberColumn("Último precio", format="localized"),
-            "pct_since_added": st.column_config.NumberColumn("Cambio %", format="%+.1f"),
-            "net_if_sold_pct": st.column_config.NumberColumn("Si vendes hoy (neto) %", format="%+.1f"),
-            "signal": "Señal actual", "added": st.column_config.DatetimeColumn("Añadida", format="D MMM HH:mm"),
-            "link": st.column_config.LinkColumn("FUT.GG", display_text="Abrir"),
+            "name": "Carta", "overall": st.column_config.NumberColumn("OVR", format="%d"),
+            "buy_price_pc": st.column_config.NumberColumn("Compré a (PC)", format="localized"),
+            "price_pc": st.column_config.NumberColumn("Vale ahora (PC)", format="localized"),
+            "pc_net_now": st.column_config.NumberColumn("Si vendes ya (neto)", format="localized",
+                                                        help="Precio actual × 0,95 − precio de compra"),
+            "pc_net_now_pct": st.column_config.NumberColumn("Neto %", format="%+.1f"),
+            "pc_break_even": st.column_config.NumberColumn("Vender a ≥ (sin perder)", format="localized",
+                                                           help="Compra / 0,95"),
+            "pc_target": st.column_config.NumberColumn("Objetivo (+10% neto)", format="localized"),
+            "pc_stop": st.column_config.NumberColumn("Invalidación (−10%)", format="localized"),
+            "signal": "Señal actual",
         },
     )
-    rows = event.selection.rows if event and event.selection else []
-    if rows:
-        sel = wl.iloc[rows[0]]
-        st.markdown(f"#### {html.escape(sel['name'])} {sel['overall'] if pd.notna(sel['overall']) else ''}")
-        _price_chart(conn, int(sel["ea_id"]))
-        if st.button("Quitar de Mi lista", key="wl_remove"):
-            fc27_history.remove_from_watchlist(conn, int(sel["ea_id"]))
-            st.rerun()
-    else:
-        st.caption("Selecciona una fila para ver su gráfico de precio.")
+
+    with st.expander("Precios de consola (FUT.GG) desde que añadiste cada carta"):
+        st.caption("Precio de la última instantánea en la que apareció cada carta. Si una carta deja de estar entre "
+                   "las que más se mueven en FUT.GG, su precio deja de actualizarse.")
+        st.dataframe(
+            wl[["name", "added_price", "last_price", "pct_since_added", "net_if_sold_pct", "link"]],
+            hide_index=True, width="stretch",
+            column_config={
+                "name": "Carta",
+                "added_price": st.column_config.NumberColumn("Al añadir (consola)", format="localized"),
+                "last_price": st.column_config.NumberColumn("Último (consola)", format="localized"),
+                "pct_since_added": st.column_config.NumberColumn("Cambio %", format="%+.1f"),
+                "net_if_sold_pct": st.column_config.NumberColumn("Neto si vendes %", format="%+.1f"),
+                "link": st.column_config.LinkColumn("FUT.GG", display_text="Abrir"),
+            },
+        )
+
+    names = {f"{r['name']} {'' if pd.isna(r['overall']) else int(r['overall'])}".strip(): int(r["ea_id"])
+             for _, r in wl.iterrows()}
+    c1, c2 = st.columns([3, 1])
+    choice = c1.selectbox("Ver gráfico (precio de consola) de", list(names), key="wl_chart")
+    c2.write("")
+    if c2.button("Quitar de Mi lista", key="wl_remove", width="stretch"):
+        fc27_history.remove_from_watchlist(conn, names[choice])
+        st.rerun()
+    _price_chart(conn, names[choice])
 
 
 def render_market(conn, signals: pd.DataFrame, followed: set[int]) -> None:
@@ -351,7 +390,7 @@ def render_market(conn, signals: pd.DataFrame, followed: set[int]) -> None:
         column_config={
             "followed": st.column_config.TextColumn("", help="⭐ = está en Mi lista", width="small"),
             "name": "Carta", "overall": st.column_config.NumberColumn("OVR", format="%d"), "rarity": "Rareza",
-            "price": st.column_config.NumberColumn("Precio", format="localized"),
+            "price": st.column_config.NumberColumn("Precio consola", format="localized"),
             "pct_1h": st.column_config.NumberColumn("1h %", format="%+.1f"),
             "pct_6h": st.column_config.NumberColumn("6h %", format="%+.1f"),
             "pct_24h": st.column_config.NumberColumn("24h %", format="%+.1f"),
@@ -374,7 +413,7 @@ def render_market(conn, signals: pd.DataFrame, followed: set[int]) -> None:
                    "<span class='fc-chip'>Sin señal</span>"
             st.markdown(f"#### {html.escape(_card_title(row))}  \n{html.escape(str(row['rarity']))} · {pill}",
                         unsafe_allow_html=True)
-            st.markdown(f"**{_fmt(row['price'])}** monedas · 24h {_pct_html(row['pct_24h'])}  \n"
+            st.markdown(f"**{_fmt(row['price'])}** monedas (consola) · 24h {_pct_html(row['pct_24h'])}  \n"
                         f"Market Score **{int(row['market_score'])}** ({row['label']}) · Riesgo **{int(row['risk_score'])}**",
                         unsafe_allow_html=True)
             plan = fc27_signals.trade_plan(row)
@@ -391,7 +430,7 @@ def render_market(conn, signals: pd.DataFrame, followed: set[int]) -> None:
             _price_chart(conn, int(row["ea_id"]), height=300)
 
 
-def render_fodder(snap: fc27_market.MarketSnapshot) -> None:
+def render_fodder(snap: fc27_market.MarketSnapshot, platform: str) -> None:
     fodder = fc27_market.fodder_table(snap.cheapest)
     st.caption("Los SBC piden puntos de Item Score. Cuanto menos cueste cada punto, mejor fodder. "
                "El precio de referencia es la mediana de las 5 cartas más baratas de cada rating.")
@@ -436,14 +475,15 @@ def render_fodder(snap: fc27_market.MarketSnapshot) -> None:
             sb = sb[sb["termina"] < pd.Timestamp("2030-01-01", tz="UTC")]  # fuera los permanentes
             for col in ("score_requirement", "cost", "cost_pc", "award_overall"):
                 sb[col] = pd.to_numeric(sb[col], errors="coerce")
-            sb = sb.sort_values("cost", ascending=False)
+            main_cost, other_cost = ("cost_pc", "cost") if platform == "PC" else ("cost", "cost_pc")
+            sb = sb.sort_values(main_cost, ascending=False)
             st.dataframe(
-                sb[["name", "score_requirement", "cost", "cost_pc", "termina", "award_name", "link"]],
+                sb[["name", "score_requirement", main_cost, other_cost, "termina", "award_name", "link"]],
                 hide_index=True, width="stretch",
                 column_config={
                     "name": "SBC", "score_requirement": st.column_config.NumberColumn("Puntos", format="localized"),
-                    "cost": st.column_config.NumberColumn("Consola", format="localized"),
-                    "cost_pc": st.column_config.NumberColumn("PC", format="localized"),
+                    main_cost: st.column_config.NumberColumn(f"Coste {platform}", format="localized"),
+                    other_cost: st.column_config.NumberColumn("Consola" if platform == "PC" else "PC", format="localized"),
                     "termina": st.column_config.DatetimeColumn("Termina (UTC)", format="ddd D MMM HH:mm"),
                     "award_name": "Premio", "link": st.column_config.LinkColumn("FUT.GG", display_text="Abrir"),
                 },
@@ -543,9 +583,15 @@ def main() -> None:
         refresh = st.button("🔄 Actualizar ahora", type="primary", width="stretch")
         auto = st.toggle("Actualizar sola cada 10 min", value=False,
                          help="Mientras la página esté abierta, vuelve a descargar FUT.GG cada 10 minutos.")
+        st.markdown("##### Tu plataforma")
+        platform = st.segmented_control("Plataforma", ["PC", "Consola"], default="PC", key="fc_platform",
+                                        label_visibility="collapsed") or "PC"
+        if platform == "PC":
+            st.caption("FUT.GG solo publica abiertamente los costes de SBC en PC. Los precios de cartas son de "
+                       "consola; apunta tus precios de PC en ⭐ Mi lista.")
         st.markdown("##### Tu presupuesto")
         budget = st.selectbox("Precio máximo por carta", list(BUDGETS), key="fc_budget", label_visibility="collapsed",
-                              help="Filtra el resumen, las señales y la tabla de mercado.")
+                              help="Filtra el resumen, las señales y la tabla de mercado (con precios de consola).")
     if refresh:
         _fetch_live.clear()
 
@@ -611,11 +657,11 @@ def main() -> None:
         with tabs[0]:
             render_signals(conn, signals, evaluated, analyst, now, followed)
         with tabs[1]:
-            render_watchlist(conn, all_signals)
+            render_watchlist(conn, all_signals, platform)
         with tabs[2]:
             render_market(conn, signals, followed)
         with tabs[3]:
-            render_fodder(snap)
+            render_fodder(snap, platform)
         with tabs[4]:
             render_alerts(alerts, analyst, now)
         with tabs[5]:

@@ -250,3 +250,36 @@ def test_watchlist_tracks_price_since_added():
     assert wl["net_if_sold_pct"] == pytest.approx(4.5)  # 110.000 × 0,95 / 100.000 − 1
     fc27_history.remove_from_watchlist(conn, 7)
     assert fc27_history.watchlist_ids(conn) == set()
+
+
+def test_pc_trade_math_includes_ea_tax():
+    m = fc27_history.pc_trade_math(100_000, 120_000)
+    assert m["break_even"] == 105_263      # 100.000 / 0,95
+    assert m["target"] == 115_789          # +10% neto
+    assert m["stop"] == 90_000
+    assert m["net_now"] == 14_000          # 120.000 × 0,95 − 100.000
+    assert m["net_now_pct"] == pytest.approx(14.0)
+    assert fc27_history.pc_trade_math(None, 120_000)["target"] is None
+
+
+def test_watchlist_stores_user_pc_prices():
+    conn = fc27_history.connect(":memory:")
+    fc27_history.add_to_watchlist(conn, {"ea_id": 7, "name": "Test", "price": 100_000}, NOW)
+    fc27_history.set_pc_prices(conn, 7, 150_000, 171_000, NOW)
+    row = fc27_history.watchlist(conn).iloc[0]
+    assert row["buy_price_pc"] == 150_000 and row["price_pc"] == 171_000
+    assert row["pc_net_now"] == round(171_000 * 0.95 - 150_000)
+
+
+def test_migration_adds_pc_columns_to_old_database(tmp_path):
+    import sqlite3
+    db = tmp_path / "old.sqlite"
+    old = sqlite3.connect(db)
+    old.execute("CREATE TABLE watchlist (ea_id INTEGER PRIMARY KEY, name TEXT NOT NULL, overall INTEGER, "
+                "rarity TEXT, url TEXT, added_at TEXT NOT NULL, added_price INTEGER)")
+    old.execute("INSERT INTO watchlist VALUES (1, 'Viejo', 85, 'TOTW', NULL, '2026-10-01T00:00:00+00:00', 5000)")
+    old.commit(); old.close()
+    conn = fc27_history.connect(db)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(watchlist)")}
+    assert {"buy_price_pc", "price_pc", "price_pc_at"} <= cols
+    assert fc27_history.watchlist(conn).iloc[0]["name"] == "Viejo"  # no se pierden datos
