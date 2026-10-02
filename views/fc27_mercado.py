@@ -280,7 +280,7 @@ def render_signals(conn, signals: pd.DataFrame, evaluated: pd.DataFrame, analyst
                             unsafe_allow_html=True)
 
 
-def render_watchlist(conn, signals: pd.DataFrame, platform: str) -> None:
+def render_watchlist(conn, signals: pd.DataFrame) -> None:
     wl = fc27_history.watchlist(conn)
     if wl.empty:
         st.info("Tu lista está vacía. Pulsa **☆ Seguir** en una señal, o selecciona una carta en la pestaña "
@@ -357,6 +357,112 @@ def render_watchlist(conn, signals: pd.DataFrame, platform: str) -> None:
     _price_chart(conn, names[choice])
 
 
+OTHER_CARD = "✏️ Otra carta (escribir nombre)"
+
+
+def render_trades(conn, signals: pd.DataFrame) -> None:
+    df = fc27_history.trades(conn)
+    s = fc27_history.trade_summary(df)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Beneficio neto", f"{_fmt(s['net_profit'])}", f"{s['closed']} cerradas", delta_color="off")
+    c2.metric("ROI", "—" if s["roi_pct"] is None else f"{s['roi_pct']:+.1f}%".replace(".", ","),
+              help="Beneficio neto / dinero invertido en operaciones cerradas")
+    c3.metric("Operaciones ganadoras", "—" if s["win_rate_pct"] is None else f"{s['win_rate_pct']:.0f}%")
+    c4.metric("Invertido en abiertas", _fmt(s["capital_in_open"]), f"{s['open']} abiertas", delta_color="off")
+    st.caption(f"Precios de PC por unidad, como en el juego. Impuesto de EA pagado en ventas: {_fmt(s['taxes_paid'])}.")
+
+    left, right = st.columns(2)
+    with left, st.form("trade_buy", border=True, clear_on_submit=True):
+        st.markdown("**Registrar compra**")
+        cards = signals[~signals["key"].str.startswith("fodder")].drop_duplicates("ea_id")
+        wl = fc27_history.watchlist(conn)
+        options = {f"{r['name']} {'' if pd.isna(r['overall']) else int(r['overall'])}".strip(): r for _, r in wl.iterrows()}
+        for _, r in cards.iterrows():
+            options.setdefault(f"{r['name']} {r['overall']}", r)
+        choice = st.selectbox("Carta", [OTHER_CARD] + list(options), index=None, placeholder="Busca una carta…")
+        custom = st.text_input("Nombre (si elegiste Otra carta)", placeholder="Ej. Fodder 84")
+        b1, b2 = st.columns(2)
+        price = b1.number_input("Precio de compra (PC, por unidad)", min_value=0, step=50, value=None)
+        qty = b2.number_input("Unidades", min_value=1, step=1, value=1)
+        note = st.text_input("Nota (opcional)", placeholder="Ej. compra para SBC POTM")
+        if st.form_submit_button("Guardar compra", type="primary", width="stretch"):
+            row = options.get(choice) if choice and choice != OTHER_CARD else None
+            name = custom.strip() if (choice in (None, OTHER_CARD)) else choice
+            sig = None
+            if row is not None and not pd.isna(row["ea_id"]):
+                match = signals[signals["ea_id"] == row["ea_id"]]
+                sig = match.iloc[0]["signal"] if not match.empty and isinstance(match.iloc[0]["signal"], str) else None
+            try:
+                fc27_history.open_trade(conn, name, price, datetime.now(timezone.utc), int(qty),
+                                        None if row is None else row["ea_id"], sig, note or None)
+                st.toast(f"Compra guardada: {name}", icon="📒")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    open_df = df[df["status"] == "Abierta"]
+    with right, st.form("trade_sell", border=True, clear_on_submit=True):
+        st.markdown("**Registrar venta**")
+        if open_df.empty:
+            st.caption("No tienes operaciones abiertas. Registra primero una compra.")
+        labels = {f"#{r.id} · {r.card_name} · {r.quantity}× a {_fmt(r.buy_price)}": int(r.id)
+                  for r in open_df.itertuples(index=False)}
+        pick = st.selectbox("Operación abierta", list(labels), index=None, placeholder="Elige una operación…")
+        sell = st.number_input("Precio de venta (PC, por unidad)", min_value=0, step=50, value=None)
+        if pick:
+            r = open_df[open_df["id"] == labels[pick]].iloc[0]
+            st.caption(f"Para no perder vende a ≥ {_fmt(r['break_even'])}; objetivo (+10% neto): {_fmt(r['target'])}.")
+        if st.form_submit_button("Guardar venta", type="primary", width="stretch", disabled=open_df.empty):
+            try:
+                if not pick:
+                    raise ValueError("Elige la operación que vendiste.")
+                fc27_history.close_trade(conn, labels[pick], sell, datetime.now(timezone.utc))
+                st.toast("Venta guardada", icon="💰")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    if df.empty:
+        st.info("Todavía no hay operaciones. Cada vez que compres o vendas en el juego, apúntalo aquí: verás tu "
+                "beneficio real después del 5% de EA y qué señales te hacen ganar dinero.")
+        return
+    st.markdown("##### Historial")
+    st.dataframe(
+        df[["id", "status", "card_name", "quantity", "buy_price", "sell_price", "net_profit", "roi_pct",
+            "break_even", "target", "signal_at_buy", "buy_at", "sell_at", "note"]].assign(
+            buy_at=pd.to_datetime(df["buy_at"], utc=True), sell_at=pd.to_datetime(df["sell_at"], utc=True)),
+        hide_index=True, width="stretch",
+        column_config={
+            "id": "#", "status": "Estado", "card_name": "Carta", "quantity": "Uds.",
+            "buy_price": st.column_config.NumberColumn("Compra", format="localized"),
+            "sell_price": st.column_config.NumberColumn("Venta", format="localized"),
+            "net_profit": st.column_config.NumberColumn("Beneficio neto", format="localized"),
+            "roi_pct": st.column_config.NumberColumn("ROI %", format="%+.1f"),
+            "break_even": st.column_config.NumberColumn("No perder ≥", format="localized"),
+            "target": st.column_config.NumberColumn("Objetivo", format="localized"),
+            "signal_at_buy": "Señal al comprar",
+            "buy_at": st.column_config.DatetimeColumn("Comprada", format="D MMM HH:mm"),
+            "sell_at": st.column_config.DatetimeColumn("Vendida", format="D MMM HH:mm"),
+            "note": "Nota",
+        },
+    )
+    by_signal = fc27_history.trade_results_by_signal(df)
+    if not by_signal.empty:
+        st.markdown("##### ¿Qué señales te hacen ganar dinero?")
+        st.dataframe(by_signal, hide_index=True, width="stretch", column_config={
+            "signal_at_buy": "Señal al comprar", "operations": "Operaciones",
+            "win_rate_pct": st.column_config.NumberColumn("Ganadoras %", format="%.0f"),
+            "net_profit": st.column_config.NumberColumn("Beneficio neto", format="localized"),
+            "roi_pct": st.column_config.NumberColumn("ROI %", format="%+.1f")})
+    with st.expander("Borrar una operación"):
+        ids = {f"#{r.id} · {r.card_name} ({r.status.lower()})": int(r.id) for r in df.itertuples(index=False)}
+        victim = st.selectbox("Operación", list(ids), index=None, placeholder="Elige la operación a borrar…",
+                              key="trade_delete_pick")
+        if st.button("Borrar", disabled=victim is None, key="trade_delete"):
+            fc27_history.delete_trade(conn, ids[victim])
+            st.rerun()
+
+
 def render_market(conn, signals: pd.DataFrame, followed: set[int]) -> None:
     cards = signals[~signals["key"].str.startswith("fodder")].copy()
     if cards.empty:
@@ -430,7 +536,7 @@ def render_market(conn, signals: pd.DataFrame, followed: set[int]) -> None:
             _price_chart(conn, int(row["ea_id"]), height=300)
 
 
-def render_fodder(snap: fc27_market.MarketSnapshot, platform: str) -> None:
+def render_fodder(snap: fc27_market.MarketSnapshot) -> None:
     fodder = fc27_market.fodder_table(snap.cheapest)
     st.caption("Los SBC piden puntos de Item Score. Cuanto menos cueste cada punto, mejor fodder. "
                "El precio de referencia es la mediana de las 5 cartas más baratas de cada rating.")
@@ -451,14 +557,13 @@ def render_fodder(snap: fc27_market.MarketSnapshot, platform: str) -> None:
                               xaxis_title="Rating", yaxis_title="Monedas por punto", separators=",.")
             st.plotly_chart(fig, width="stretch")
             st.dataframe(
-                fodder.drop(columns=["is_best"]), hide_index=True, width="stretch",
+                fodder.drop(columns=["is_best", "score_verified"]), hide_index=True, width="stretch",
                 column_config={
                     "overall": "Rating", "name": "Más barato",
                     "min_price": st.column_config.NumberColumn("Mínimo", format="localized"),
                     "price": st.column_config.NumberColumn("Referencia", format="localized"),
                     "item_score": st.column_config.NumberColumn("Item Score", format="localized"),
                     "coins_per_point": st.column_config.NumberColumn("Monedas/punto", format="%.2f"),
-                    "score_verified": st.column_config.CheckboxColumn("Puntos verificados"),
                 },
             )
             floor = fc27_market.fodder_floor_price(snap.cheapest)
@@ -475,15 +580,14 @@ def render_fodder(snap: fc27_market.MarketSnapshot, platform: str) -> None:
             sb = sb[sb["termina"] < pd.Timestamp("2030-01-01", tz="UTC")]  # fuera los permanentes
             for col in ("score_requirement", "cost", "cost_pc", "award_overall"):
                 sb[col] = pd.to_numeric(sb[col], errors="coerce")
-            main_cost, other_cost = ("cost_pc", "cost") if platform == "PC" else ("cost", "cost_pc")
-            sb = sb.sort_values(main_cost, ascending=False)
+            sb = sb.sort_values("cost_pc", ascending=False)
             st.dataframe(
-                sb[["name", "score_requirement", main_cost, other_cost, "termina", "award_name", "link"]],
+                sb[["name", "score_requirement", "cost_pc", "cost", "termina", "award_name", "link"]],
                 hide_index=True, width="stretch",
                 column_config={
                     "name": "SBC", "score_requirement": st.column_config.NumberColumn("Puntos", format="localized"),
-                    main_cost: st.column_config.NumberColumn(f"Coste {platform}", format="localized"),
-                    other_cost: st.column_config.NumberColumn("Consola" if platform == "PC" else "PC", format="localized"),
+                    "cost_pc": st.column_config.NumberColumn("Coste PC", format="localized"),
+                    "cost": st.column_config.NumberColumn("Consola", format="localized"),
                     "termina": st.column_config.DatetimeColumn("Termina (UTC)", format="ddd D MMM HH:mm"),
                     "award_name": "Premio", "link": st.column_config.LinkColumn("FUT.GG", display_text="Abrir"),
                 },
@@ -520,7 +624,14 @@ def render_alerts(alerts: list[fc27_signals.Alert], analyst: dict, now: datetime
             st.caption("Calendario mantenido a mano en data/fc27_analyst.json.")
 
 
-def render_help(evaluated: pd.DataFrame) -> None:
+def render_help(evaluated: pd.DataFrame, snap: fc27_market.MarketSnapshot) -> None:
+    st.markdown("##### Estado del mercado por rareza (24h)")
+    breadth = fc27_signals.market_breadth(snap.movers)
+    if not breadth.empty:
+        st.dataframe(breadth, hide_index=True, width="stretch", column_config={
+            "rarity": "Rareza", "cards": "Cartas", "median_24h": st.column_config.NumberColumn("Mediana 24h %", format="%+.1f"),
+            "up": "Suben", "down": "Bajan", "tone": "Tono"})
+
     st.markdown("##### ¿Aciertan las señales?")
     if evaluated.empty:
         st.info("Todavía no hay señales con el horizonte cumplido. Cada señal COMPRAR o RIESGO se guarda y se "
@@ -583,15 +694,11 @@ def main() -> None:
         refresh = st.button("🔄 Actualizar ahora", type="primary", width="stretch")
         auto = st.toggle("Actualizar sola cada 10 min", value=False,
                          help="Mientras la página esté abierta, vuelve a descargar FUT.GG cada 10 minutos.")
-        st.markdown("##### Tu plataforma")
-        platform = st.segmented_control("Plataforma", ["PC", "Consola"], default="PC", key="fc_platform",
-                                        label_visibility="collapsed") or "PC"
-        if platform == "PC":
-            st.caption("FUT.GG solo publica abiertamente los costes de SBC en PC. Los precios de cartas son de "
-                       "consola; apunta tus precios de PC en ⭐ Mi lista.")
         st.markdown("##### Tu presupuesto")
         budget = st.selectbox("Precio máximo por carta", list(BUDGETS), key="fc_budget", label_visibility="collapsed",
                               help="Filtra el resumen, las señales y la tabla de mercado (con precios de consola).")
+        st.caption("Plataforma: PC. FUT.GG solo publica abiertamente los costes de SBC en PC; los precios de cartas "
+                   "son de consola. Tus precios de PC van en ⭐ Mi lista y 📒 Operaciones.")
     if refresh:
         _fetch_live.clear()
 
@@ -639,33 +746,34 @@ def main() -> None:
         render_today(signals, events, now)
 
         counts = signals["signal"].value_counts()
-        breadth = fc27_signals.market_breadth(snap.movers)
-        tone_parts = " · ".join(f"{r.rarity} {r.median_24h:+.1f}%".replace(".", ",") for r in breadth.itertuples(index=False))
         st.markdown(
             f"<div class='fc-strip'><span>Mercado 24h: <b>{fc27_signals.overall_tone(snap.movers)}</b></span>"
             f"<span>Señales en tu presupuesto: <b>{counts.get('COMPRAR', 0)}</b> comprar · "
-            f"<b>{counts.get('VIGILAR', 0)}</b> vigilar · <b>{counts.get('RIESGO', 0)}</b> riesgo</span>"
-            f"<span>Mediana por rareza: {html.escape(tone_parts)}</span></div>",
+            f"<b>{counts.get('VIGILAR', 0)}</b> vigilar · <b>{counts.get('RIESGO', 0)}</b> riesgo</span></div>",
             unsafe_allow_html=True,
         )
-        critical = [a for a in alerts if a.level == "crítica"]
-        for a in critical[:3]:
-            st.error(f"**{a.title}** · {a.detail}", icon="🚨")
+        for a in fc27_signals.headline_alerts(alerts, followed)[:3]:
+            show = st.error if a.level == "crítica" else st.warning
+            show(f"**{a.title}** · {a.detail}", icon="🚨" if a.level == "crítica" else "⚠️")
 
-        tabs = st.tabs(["🎯 Señales", f"⭐ Mi lista ({len(followed)})", "📊 Mercado", "🧱 Fodder y SBC",
-                        f"🚨 Alertas ({len(alerts)})", "📘 Cómo funciona"])
+        # Etiquetas fijas (sin contadores): si cambian, Streamlit vuelve a la primera pestaña
+        # después de guardar algo, y el usuario pierde dónde estaba.
+        tabs = st.tabs(["🎯 Señales", "⭐ Mi lista", "📒 Operaciones", "📊 Mercado",
+                        "🧱 Fodder y SBC", "🚨 Alertas", "📘 Cómo funciona"])
         with tabs[0]:
             render_signals(conn, signals, evaluated, analyst, now, followed)
         with tabs[1]:
-            render_watchlist(conn, all_signals, platform)
+            render_watchlist(conn, all_signals)
         with tabs[2]:
-            render_market(conn, signals, followed)
+            render_trades(conn, all_signals)
         with tabs[3]:
-            render_fodder(snap, platform)
+            render_market(conn, signals, followed)
         with tabs[4]:
-            render_alerts(alerts, analyst, now)
+            render_fodder(snap)
         with tabs[5]:
-            render_help(evaluated)
+            render_alerts(alerts, analyst, now)
+        with tabs[6]:
+            render_help(evaluated, snap)
 
     body()
 
