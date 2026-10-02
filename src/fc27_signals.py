@@ -64,6 +64,8 @@ class Alert:
     status: str     # CONFIRMADO / ALTA / MEDIA / BAJA / RUMOR
     title: str
     detail: str
+    category: str = "otra"   # sustituto, movimiento_1h, subida_24h, sbc, nuevas, evento
+    ea_id: int | None = None  # carta afectada, si la hay (para filtrar por Mi lista)
 
 
 # ---------------------------------------------------------------------------
@@ -146,12 +148,15 @@ def classify(market_score: float) -> str:
     return "Riesgo elevado"
 
 
-def decide_signal(market_score: float, risk_score: float) -> str | None:
+def decide_signal(market_score: float, risk_score: float, has_reason: bool = True) -> str | None:
+    """`has_reason`: la carta tiene un motivo concreto para vigilarla (fuera de packs,
+    caída sin causa, suelo de fodder…). Sin él, una puntuación media no basta para
+    VIGILAR: así la lista no se llena de cartas que solo suben con el mercado."""
     if market_score >= 70 and risk_score <= 45:
         return "COMPRAR"
     if risk_score >= 70 or market_score < 40:
         return "RIESGO"
-    if market_score >= 55:
+    if market_score >= 55 and has_reason:
         return "VIGILAR"
     return None
 
@@ -182,6 +187,18 @@ def _sbc_substitutes(sbcs: pd.DataFrame) -> dict[str, tuple[int, int, str]]:
         if key not in out or r.cost < out[key][1]:
             out[key] = (int(r.award_overall), int(r.cost), r.name)
     return out
+
+
+def _int_or_none(v) -> int | None:
+    return None if v is None or pd.isna(v) else int(v)
+
+
+def headline_alerts(alerts: list[Alert], followed: set[int]) -> list[Alert]:
+    """Alertas que merecen un aviso destacado arriba de la página: sustitutos más
+    baratos y movimientos fuertes de cartas que el usuario sigue. El resto se
+    queda en la pestaña Alertas para no meter ruido."""
+    return [a for a in alerts
+            if a.category == "sustituto" or (a.ea_id is not None and a.ea_id in followed and a.level != "info")]
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -314,7 +331,9 @@ def score_movers(
 
         downside = round(10 - risk / 10)
         ms = int(round(momentum + supply + demand + upcoming + utility + NEWS_NEUTRAL + downside))
-        signal = decide_signal(ms, risk)
+        # Motivo concreto para vigilar: oferta congelada, posible sobrerreacción o suelo de fodder.
+        has_reason = (not in_packs) or fodder_supported or (p24 <= -2 and not is_new)
+        signal = decide_signal(ms, risk, has_reason)
         horizon, horizon_h = ("1-3 días", 72) if not in_packs or is_base else ("3-7 días", 168)
         rows.append({
             "key": f"card:{r.ea_id}", "ea_id": r.ea_id, "name": r.name, "overall": r.overall, "rarity": r.rarity,
@@ -444,32 +463,39 @@ def build_alerts(
             cost = f"~{int(r.cost):,} monedas" if pd.notna(r.cost) else ""
             detail = (pts + cost).replace(",", ".")
             if created is not None and created <= 1:
-                alerts.append(Alert("aviso", "CONFIRMADO", f"Nuevo SBC: {r.name}", detail))
+                alerts.append(Alert("aviso", "CONFIRMADO", f"Nuevo SBC: {r.name}", detail, "sbc"))
             if ends is not None and 0 <= ends <= 1:
-                alerts.append(Alert("info", "CONFIRMADO", f"Expira en {ends * 24:.0f}h: {r.name}", detail))
+                alerts.append(Alert("info", "CONFIRMADO", f"Expira en {ends * 24:.0f}h: {r.name}", detail, "sbc"))
     if changes is not None and not changes.empty and "pct_1h" in changes:
         names = dict(zip(snap.movers["ea_id"], snap.movers["name"])) if not snap.movers.empty else {}
         for r in changes.dropna(subset=["pct_1h"]).itertuples(index=False):
             label = names.get(r.ea_id, str(r.ea_id))
             if r.pct_1h <= -10:
-                alerts.append(Alert("crítica", "CONFIRMADO", f"{label} cae {r.pct_1h:.1f}% en 1h", f"Precio {int(r.price_now):,}".replace(",", ".")))
+                # En cartas caras con pocas ventas, una sola oferta mueve mucho el precio: solo aviso.
+                level = "crítica" if r.price_now < ILLIQUID_PRICE else "aviso"
+                alerts.append(Alert(level, "CONFIRMADO", f"{label} cae {r.pct_1h:.1f}% en 1h",
+                                    f"Precio {int(r.price_now):,}".replace(",", "."), "movimiento_1h", int(r.ea_id)))
             elif r.pct_1h >= 15:
-                alerts.append(Alert("aviso", "CONFIRMADO", f"{label} sube {r.pct_1h:+.1f}% en 1h", f"Precio {int(r.price_now):,}".replace(",", ".")))
+                alerts.append(Alert("aviso", "CONFIRMADO", f"{label} sube {r.pct_1h:+.1f}% en 1h",
+                                    f"Precio {int(r.price_now):,}".replace(",", "."), "movimiento_1h", int(r.ea_id)))
     if not signals.empty:
         for r in signals[signals["pct_24h"].fillna(0) >= 50].itertuples(index=False):
-            alerts.append(Alert("aviso", "CONFIRMADO", f"{r.name} {r.overall} sube {r.pct_24h:+.0f}% en 24h", "Subida vertical: revisa antes de comprar."))
+            alerts.append(Alert("aviso", "CONFIRMADO", f"{r.name} {r.overall} sube {r.pct_24h:+.0f}% en 24h",
+                                "Subida vertical: revisa antes de comprar.", "subida_24h", _int_or_none(r.ea_id)))
         for r in signals.itertuples(index=False):
             for risk in r.risks:
                 if risk.startswith("Sustituto"):
-                    alerts.append(Alert("crítica", "CONFIRMADO", f"Sustituto más barato para {r.name} {r.overall}", risk))
+                    alerts.append(Alert("crítica", "CONFIRMADO", f"Sustituto más barato para {r.name} {r.overall}", risk,
+                                        "sustituto", _int_or_none(r.ea_id)))
     if not snap.movers.empty:
         fresh = snap.movers[snap.movers["created_at"].map(lambda c: (_age_days(c, now) or 99) <= 1)]
         if not fresh.empty:
-            alerts.append(Alert("info", "CONFIRMADO", f"{len(fresh)} cartas nuevas en las últimas 24h",
+            alerts.append(Alert("info", "CONFIRMADO", f"{len(fresh)} cartas nuevas en las últimas 24h", category="nuevas",
+                                detail=
                                 ", ".join(sorted(fresh["rarity"].dropna().unique()))))
     for e in upcoming_events(analyst, now, days=2).itertuples(index=False):
         if e.when >= now:
-            alerts.append(Alert("aviso", e.status, f"Próximo: {e.label}", format_when(e.when)))
+            alerts.append(Alert("aviso", e.status, f"Próximo: {e.label}", format_when(e.when), "evento"))
     order = {"crítica": 0, "aviso": 1, "info": 2}
     return sorted(alerts, key=lambda a: order.get(a.level, 3))
 

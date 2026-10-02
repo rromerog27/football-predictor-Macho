@@ -197,8 +197,7 @@ antigüedad.
 descargas automáticas, que la app no intenta saltarse. Por eso:
 
 - Los precios de cartas se muestran marcados como "(consola)".
-- Con **Tu plataforma: PC** (por defecto) la tabla de SBC muestra primero el
-  coste en PC, que FUT.GG sí publica.
+- La tabla de SBC muestra primero el coste en PC, que FUT.GG sí publica.
 - En **⭐ Mi lista** apuntas a cuánto compraste cada carta en PC y cuánto vale
   ahora; la app calcula el precio para no perder (compra / 0,95), el objetivo
   (+10% neto), la invalidación (−10%) y el beneficio neto si vendes ya, todo
@@ -207,11 +206,20 @@ descargas automáticas, que la app no intenta saltarse. Por eso:
 **Historial y calibración.** Las variaciones de 1h, 6h, 3 días y 7 días, y la
 tasa de acierto de las señales, se calculan con el historial propio, así que
 aparecen a medida que se acumulan instantáneas. Para que crezca sin abrir la
-app, programa el script (cron, o el Programador de tareas en Windows):
+app:
 
-```bash
-python scripts/fc27_snapshot.py      # una instantánea; pensado para cada 30 min
-```
+- **Windows:** doble clic en `scripts/programar_snapshots_windows.bat`. Crea una
+  tarea del Programador de tareas que guarda una instantánea cada 30 minutos,
+  sin abrir ventanas, mientras tu sesión esté abierta. Para quitarla:
+  `scripts/quitar_snapshots_windows.bat`.
+- **Linux/macOS:** programa `python scripts/fc27_snapshot.py` con cron.
+
+Cada ejecución deja una línea en `data/fc27_snapshot.log` (no se versiona).
+
+**📒 Operaciones.** Diario de compras y ventas reales, con precios de PC por
+unidad. Muestra el beneficio neto (con el 5% de EA), el ROI, el % de
+operaciones ganadoras, el capital invertido en operaciones abiertas y qué
+señal había al comprar, para ver qué señales te hacen ganar dinero.
 
 **Calendario y notas del analista.** Las fechas de promos, rumores y tesis
 manuales viven en `data/fc27_analyst.json`. Las notas desaparecen solas al
@@ -225,6 +233,7 @@ regla de "promo próxima" en las puntuaciones.
 | `src/fc27_signals.py` | Reglas de Market Score, Risk Score, señales, plan de operación, estado del mercado y alertas. |
 | `views/fc27_mercado.py` | La página de Streamlit. |
 | `scripts/fc27_snapshot.py` | Guarda una instantánea desde la línea de comandos. |
+| `scripts/programar_snapshots_windows.bat` / `quitar_snapshots_windows.bat` | Activan o quitan la instantánea automática cada 30 min en Windows. |
 | `data/fc27_analyst.json` | Calendario y notas mantenidos a mano. |
 
 Las señales son heurísticas: el Market Score es un indicador comparativo, no

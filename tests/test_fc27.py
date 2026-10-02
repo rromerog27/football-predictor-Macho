@@ -283,3 +283,53 @@ def test_migration_adds_pc_columns_to_old_database(tmp_path):
     cols = {r[1] for r in conn.execute("PRAGMA table_info(watchlist)")}
     assert {"buy_price_pc", "price_pc", "price_pc_at"} <= cols
     assert fc27_history.watchlist(conn).iloc[0]["name"] == "Viejo"  # no se pierden datos
+
+
+def test_trade_log_profit_includes_ea_tax():
+    conn = fc27_history.connect(":memory:")
+    win = fc27_history.open_trade(conn, "Fodder de 84", 650, NOW, quantity=100, signal_at_buy="COMPRAR")
+    loss = fc27_history.open_trade(conn, "Olise TOTW", 900_000, NOW, signal_at_buy="RIESGO")
+    fc27_history.open_trade(conn, "Haaland", 110_000, NOW)  # sigue abierta
+    fc27_history.close_trade(conn, win, 800, NOW + timedelta(days=2))
+    fc27_history.close_trade(conn, loss, 850_000, NOW + timedelta(days=1))
+    df = fc27_history.trades(conn).set_index("id")
+    assert df.loc[win, "net_profit"] == 800 * 0.95 * 100 - 650 * 100      # +11.000
+    assert df.loc[loss, "net_profit"] == 850_000 * 0.95 - 900_000         # −92.500
+    assert df.loc[win, "break_even"] == round(650 / 0.95)
+    s = fc27_history.trade_summary(fc27_history.trades(conn))
+    assert s["closed"] == 2 and s["open"] == 1
+    assert s["net_profit"] == 11_000 - 92_500
+    assert s["win_rate_pct"] == 50.0
+    assert s["capital_in_open"] == 110_000
+    by_signal = fc27_history.trade_results_by_signal(fc27_history.trades(conn)).set_index("signal_at_buy")
+    assert by_signal.loc["COMPRAR", "net_profit"] == 11_000
+
+
+def test_trade_validation_and_delete():
+    conn = fc27_history.connect(":memory:")
+    with pytest.raises(ValueError):
+        fc27_history.open_trade(conn, "", 1000, NOW)
+    with pytest.raises(ValueError):
+        fc27_history.open_trade(conn, "X", 0, NOW)
+    tid = fc27_history.open_trade(conn, "X", 1000, NOW)
+    fc27_history.close_trade(conn, tid, 1200, NOW)
+    fc27_history.close_trade(conn, tid, 5000, NOW)  # una operación cerrada no se vuelve a cerrar
+    assert fc27_history.trades(conn).iloc[0]["sell_price"] == 1200
+    fc27_history.delete_trade(conn, tid)
+    assert fc27_history.trades(conn).empty
+    assert fc27_history.trade_summary(fc27_history.trades(conn))["roi_pct"] is None
+
+
+def test_vigilar_needs_a_concrete_reason():
+    assert fc27_signals.decide_signal(60, 30, has_reason=False) is None
+    assert fc27_signals.decide_signal(60, 30, has_reason=True) == "VIGILAR"
+
+
+def test_headline_alerts_only_substitutes_and_followed_cards():
+    alerts = [
+        fc27_signals.Alert("crítica", "CONFIRMADO", "Sustituto", "x", "sustituto", 1),
+        fc27_signals.Alert("crítica", "CONFIRMADO", "Icono cae", "x", "movimiento_1h", 2),
+        fc27_signals.Alert("aviso", "CONFIRMADO", "Mi carta cae", "x", "movimiento_1h", 3),
+    ]
+    titles = [a.title for a in fc27_signals.headline_alerts(alerts, followed={3})]
+    assert titles == ["Sustituto", "Mi carta cae"]

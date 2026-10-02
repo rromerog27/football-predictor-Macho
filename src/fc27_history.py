@@ -58,6 +58,19 @@ CREATE TABLE IF NOT EXISTS watchlist (
     added_at TEXT NOT NULL,
     added_price INTEGER
 );
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_name TEXT NOT NULL,
+    ea_id INTEGER,
+    platform TEXT NOT NULL DEFAULT 'PC',
+    quantity INTEGER NOT NULL DEFAULT 1,
+    buy_price INTEGER NOT NULL,
+    buy_at TEXT NOT NULL,
+    sell_price INTEGER,
+    sell_at TEXT,
+    signal_at_buy TEXT,
+    note TEXT
+);
 CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
@@ -296,6 +309,100 @@ def watchlist(conn: sqlite3.Connection) -> pd.DataFrame:
     for key in ("break_even", "target", "stop", "net_now", "net_now_pct"):
         df[f"pc_{key}"] = [m[key] for m in math]
     return df
+
+
+# ---------------------------------------------------------------------------
+# Diario de operaciones (compras y ventas reales del usuario)
+# ---------------------------------------------------------------------------
+
+TRADE_COLUMNS = [
+    "id", "card_name", "ea_id", "platform", "quantity", "buy_price", "buy_at", "sell_price", "sell_at",
+    "signal_at_buy", "note", "status", "cost", "proceeds", "net_profit", "roi_pct", "break_even", "target",
+]
+
+
+def open_trade(conn: sqlite3.Connection, card_name: str, buy_price: int, now: datetime, quantity: int = 1,
+               ea_id: int | None = None, signal_at_buy: str | None = None, note: str | None = None,
+               platform: str = "PC") -> int:
+    """Registra una compra (operación abierta). Devuelve su id."""
+    if not card_name or buy_price is None or buy_price <= 0 or quantity < 1:
+        raise ValueError("Hace falta el nombre de la carta, un precio de compra mayor que 0 y al menos 1 unidad.")
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO trades(card_name, ea_id, platform, quantity, buy_price, buy_at, signal_at_buy, note) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (card_name.strip(), _int_or_none(ea_id), platform, int(quantity), int(buy_price), _iso(now),
+             signal_at_buy, note),
+        )
+    return cur.lastrowid
+
+
+def close_trade(conn: sqlite3.Connection, trade_id: int, sell_price: int, now: datetime) -> None:
+    """Registra la venta de una operación abierta (precio por unidad, antes del impuesto)."""
+    if sell_price is None or sell_price <= 0:
+        raise ValueError("El precio de venta debe ser mayor que 0.")
+    with conn:
+        conn.execute("UPDATE trades SET sell_price = ?, sell_at = ? WHERE id = ? AND sell_price IS NULL",
+                     (int(sell_price), _iso(now), int(trade_id)))
+
+
+def delete_trade(conn: sqlite3.Connection, trade_id: int) -> None:
+    with conn:
+        conn.execute("DELETE FROM trades WHERE id = ?", (int(trade_id),))
+
+
+def trades(conn: sqlite3.Connection) -> pd.DataFrame:
+    """Todas las operaciones con sus cuentas (impuesto del 5% de EA incluido).
+
+    - cost: compra × unidades. proceeds: venta × 0,95 × unidades (solo cerradas).
+    - net_profit / roi_pct: beneficio neto y porcentaje sobre lo invertido (solo cerradas).
+    - break_even / target: precio de venta por unidad para no perder y para ganar +10% neto.
+    """
+    df = pd.read_sql_query("SELECT * FROM trades ORDER BY buy_at DESC, id DESC", conn)
+    if df.empty:
+        return pd.DataFrame(columns=TRADE_COLUMNS)
+    closed = df["sell_price"].notna()
+    df["status"] = closed.map({True: "Cerrada", False: "Abierta"})
+    df["cost"] = df["buy_price"] * df["quantity"]
+    df["proceeds"] = (df["sell_price"] * (1 - EA_TAX) * df["quantity"]).round()
+    df["net_profit"] = (df["proceeds"] - df["cost"]).where(closed)
+    df["roi_pct"] = (df["net_profit"] / df["cost"] * 100).round(2)
+    df["break_even"] = (df["buy_price"] / (1 - EA_TAX)).round()
+    df["target"] = (df["buy_price"] * 1.10 / (1 - EA_TAX)).round()
+    return df[TRADE_COLUMNS]
+
+
+def trade_summary(df: pd.DataFrame) -> dict:
+    """Resumen del diario: beneficio total, ROI, % de operaciones ganadoras y capital invertido."""
+    closed = df[df["status"] == "Cerrada"] if not df.empty else df
+    open_ = df[df["status"] == "Abierta"] if not df.empty else df
+    invested = float(closed["cost"].sum()) if not closed.empty else 0.0
+    profit = float(closed["net_profit"].sum()) if not closed.empty else 0.0
+    return {
+        "closed": len(closed),
+        "open": len(open_),
+        "net_profit": round(profit),
+        "roi_pct": round(profit / invested * 100, 2) if invested else None,
+        "win_rate_pct": round((closed["net_profit"] > 0).mean() * 100, 1) if len(closed) else None,
+        "taxes_paid": round(float((closed["sell_price"] * EA_TAX * closed["quantity"]).sum())) if len(closed) else 0,
+        "capital_in_open": round(float(open_["cost"].sum())) if len(open_) else 0,
+    }
+
+
+def trade_results_by_signal(df: pd.DataFrame) -> pd.DataFrame:
+    """Resultado de las operaciones cerradas agrupadas por la señal que había al comprar."""
+    cols = ["signal_at_buy", "operations", "win_rate_pct", "net_profit", "roi_pct"]
+    closed = df[df["status"] == "Cerrada"] if not df.empty else df
+    if closed.empty:
+        return pd.DataFrame(columns=cols)
+    g = closed.assign(signal_at_buy=closed["signal_at_buy"].fillna("Sin señal")).groupby("signal_at_buy")
+    out = pd.DataFrame({
+        "operations": g.size(),
+        "win_rate_pct": g["net_profit"].apply(lambda s: round((s > 0).mean() * 100, 1)),
+        "net_profit": g["net_profit"].sum().round(),
+        "roi_pct": (g["net_profit"].sum() / g["cost"].sum() * 100).round(2),
+    }).reset_index()
+    return out[cols].sort_values("net_profit", ascending=False).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
