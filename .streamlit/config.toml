@@ -1,6 +1,11 @@
 # Configuración compartida de la app (los secretos van en secrets.toml, que está en .gitignore).
 [theme]
+# Tema claro fijo: los componentes propios (tarjetas, avisos) están diseñados sobre fondo claro.
+base = "light"
 primaryColor = "#1D4ED8"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F1F5F9"
+textColor = "#0F172A"
 
 [client]
 # Menú de Streamlit reducido: sin opciones de desarrollador para el usuario final.

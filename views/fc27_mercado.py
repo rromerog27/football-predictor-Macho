@@ -17,7 +17,7 @@ antigüedad.
 from __future__ import annotations
 
 import html
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -71,6 +71,40 @@ st.markdown(
     .fc-card-meta {{ color:{ui_theme.INK_600}; font-size:.8rem; }}
     .fc-plan {{ font-size:.86rem; line-height:1.55; }}
     .fc-plan span {{ color:{ui_theme.INK_600}; }}
+    .fc-badges {{ display:flex; flex-wrap:wrap; gap:6px; margin:.35rem 0 1rem 0; }}
+    .fc-badge {{ display:inline-flex; align-items:center; gap:5px; font-size:.78rem; font-weight:600;
+                padding:3px 10px; border-radius:999px; background:{ui_theme.GRAY_100}; color:{ui_theme.INK_600}; }}
+    .fc-badge.live {{ background:#DCFCE7; color:#15803D; }}
+    .fc-badge.off {{ background:#FFEDD5; color:#9A3412; }}
+    .fc-banner {{ display:flex; gap:10px; align-items:flex-start; padding:9px 14px; border-radius:10px;
+                 font-size:.88rem; line-height:1.4; margin:.35rem 0; border:1px solid; }}
+    .fc-banner.crit {{ background:#FEF2F2; border-color:#FECACA; color:#991B1B; }}
+    .fc-banner.warn {{ background:#FFFBEB; border-color:#FDE68A; color:#92400E; }}
+    .fc-banner b {{ font-weight:700; }}
+    .fc-sig {{ display:flex; flex-direction:column; gap:10px; }}
+    .fc-sig-top {{ display:flex; gap:12px; align-items:center; }}
+    .fc-ovr {{ flex:0 0 auto; width:46px; height:52px; border-radius:8px; display:flex; flex-direction:column;
+              align-items:center; justify-content:center; font-weight:800; line-height:1;
+              background:linear-gradient(160deg,#F7E08A 0%,#D4AF37 55%,#B8860B 100%); color:#3B2F0B;
+              box-shadow:inset 0 0 0 1px rgba(0,0,0,.08); }}
+    .fc-ovr .r {{ font-size:1.25rem; }}
+    .fc-ovr .t {{ font-size:.55rem; font-weight:700; letter-spacing:.05em; margin-top:3px; text-transform:uppercase; }}
+    .fc-ovr.special {{ background:linear-gradient(160deg,#1F2937 0%,#111827 100%); color:#F7E08A; }}
+    .fc-ovr.fodder {{ background:linear-gradient(160deg,#E2E8F0 0%,#CBD5E1 100%); color:#334155; }}
+    .fc-sig-id {{ flex:1 1 auto; min-width:0; }}
+    .fc-sig-name {{ font-weight:700; font-size:1rem; line-height:1.25; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .fc-sig-meta {{ color:{ui_theme.INK_600}; font-size:.78rem; }}
+    .fc-stats {{ display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:6px; }}
+    .fc-stat {{ background:{ui_theme.GRAY_50}; border:1px solid {ui_theme.GRAY_100}; border-radius:8px; padding:6px 8px; min-width:0; }}
+    .fc-stat .k {{ font-size:.66rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:{ui_theme.INK_400}; }}
+    .fc-stat .v {{ font-size:.92rem; font-weight:700; color:{ui_theme.INK_900}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    .fc-meter {{ height:4px; border-radius:2px; background:{ui_theme.GRAY_200}; margin-top:4px; overflow:hidden; }}
+    .fc-meter i {{ display:block; height:100%; border-radius:2px; }}
+    .fc-spark {{ display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:.75rem; color:{ui_theme.INK_400}; }}
+    .fc-planline {{ font-size:.84rem; line-height:1.5; color:{ui_theme.INK_900}; }}
+    .fc-planline span {{ color:{ui_theme.INK_600}; }}
+    .fc-empty {{ border:1px dashed {ui_theme.GRAY_200}; border-radius:12px; padding:14px 16px; color:{ui_theme.INK_600};
+                font-size:.88rem; background:{ui_theme.GRAY_50}; }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -96,6 +130,18 @@ def _fmt(n) -> str:
     if n is None or (isinstance(n, float) and pd.isna(n)):
         return "—"
     return f"{int(n):,}".replace(",", ".")
+
+
+def _fmt_short(n) -> str:
+    """Precio corto para espacios pequeños: 1,70M · 995k · 14.000."""
+    if n is None or (isinstance(n, float) and pd.isna(n)):
+        return "—"
+    n = int(n)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M".replace(".", ",")
+    if n >= 100_000:
+        return f"{n / 1000:.0f}k"
+    return _fmt(n)
 
 
 def _pct_html(p) -> str:
@@ -212,29 +258,52 @@ def render_today(signals: pd.DataFrame, events: pd.DataFrame, now: datetime) -> 
 # ---------------------------------------------------------------------------
 
 
-def _signal_card(conn, row: pd.Series, followed: set[int], kind: str) -> None:
+def _ovr_badge(row) -> str:
+    if _is_fodder(row):
+        return f"<div class='fc-ovr fodder'><span class='r'>{row['overall']}</span><span class='t'>Fodder</span></div>"
+    rarity = str(row["rarity"] or "")
+    short = {"Team of the week": "TOTW", "Destined for Glory": "DFG", "Base Icon": "Icon", "Base Hero": "Hero"}
+    special = rarity not in ("", "Oro rara (fodder)")
+    tag = short.get(rarity, rarity[:6])
+    return (f"<div class='fc-ovr {'special' if special else ''}'><span class='r'>{row['overall']}</span>"
+            f"<span class='t'>{html.escape(tag)}</span></div>")
+
+
+def _meter(value: int, color: str) -> str:
+    return f"<div class='fc-meter'><i style='width:{max(0, min(100, int(value)))}%;background:{color}'></i></div>"
+
+
+def _signal_card(conn, row: pd.Series, followed: set[int], kind: str, series: dict[int, list[int]]) -> None:
     with st.container(border=True):
         css, label = PILL[kind]
-        meta = "" if _is_fodder(row) else f"{html.escape(str(row['rarity']))} · "
-        st.markdown(
-            f"<div class='fc-card-head'><div><div class='fc-card-name'>{html.escape(_card_title(row))}</div>"
-            f"<div class='fc-card-meta'>{meta}Horizonte {row['horizon']}</div></div>"
-            f"<span class='fc-pill {css}'>{label}</span></div>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(f"**{_fmt(row['price'])}** monedas (consola) &nbsp; 24h {_pct_html(row['pct_24h'])}",
-                    unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        c1.progress(int(row["market_score"]) / 100, text=f"Market {int(row['market_score'])}")
-        c2.progress(int(row["risk_score"]) / 100, text=f"Riesgo {int(row['risk_score'])}")
+        meta = "Mejor fodder para SBC" if _is_fodder(row) else html.escape(str(row["rarity"]))
+        name = html.escape(str(row["name"]) if _is_fodder(row) else str(row["name"]))
         plan = fc27_signals.trade_plan(row)
+        pts = series.get(int(row["ea_id"]), []) if not pd.isna(row["ea_id"]) else []
+        spark = ui_theme.sparkline_svg(pts, width=150, height=30)
+        spark_html = (f"<div class='fc-spark'><span>Tu historial ({len(pts)} puntos)</span>{spark}</div>" if spark
+                      else "<div class='fc-spark'><span>Sin historial todavía</span></div>")
+        ms, rk = int(row["market_score"]), int(row["risk_score"])
         st.markdown(
-            f"<div class='fc-plan'><span>Entrada:</span> {html.escape(plan['zona'])}<br>"
-            f"<span>Objetivo:</span> {html.escape(plan['objetivo'])}<br>"
-            f"<span>Invalidación:</span> {html.escape(plan['invalidacion'])}</div>",
+            f"""<div class='fc-sig'>
+              <div class='fc-sig-top'>{_ovr_badge(row)}
+                <div class='fc-sig-id'><div class='fc-sig-name' title='{name}'>{name}</div>
+                  <div class='fc-sig-meta'>{meta} · {row['horizon']}</div></div>
+                <span class='fc-pill {css}'>{label}</span></div>
+              <div class='fc-stats'>
+                <div class='fc-stat'><div class='k'>Precio</div><div class='v' title='{_fmt(row['price'])} monedas (consola)'>{_fmt_short(row['price'])}</div></div>
+                <div class='fc-stat'><div class='k'>24h</div><div class='v'>{_pct_html(row['pct_24h'])}</div></div>
+                <div class='fc-stat'><div class='k'>Market</div><div class='v'>{ms}</div>{_meter(ms, ui_theme.BLUE)}</div>
+                <div class='fc-stat'><div class='k'>Riesgo</div><div class='v'>{rk}</div>{_meter(rk, '#DC2626' if rk >= 70 else '#F59E0B' if rk >= 45 else '#16A34A')}</div>
+              </div>
+              {spark_html}
+              <div class='fc-planline'><span>Entrada</span> {html.escape(plan['zona'])}<br>
+                <span>Objetivo</span> {html.escape(plan['objetivo'])} · <span>Stop</span> {html.escape(plan['invalidacion'])}</div>
+            </div>""",
             unsafe_allow_html=True,
         )
-        with st.expander("Ver análisis"):
+        c1, c2 = st.columns([3, 2]) if not _is_fodder(row) else (st.container(), None)
+        with c1, st.expander("Análisis"):
             if row["reasons"]:
                 st.markdown("**Por qué**\n" + "\n".join(f"- {r}" for r in row["reasons"]))
             if row["risks"]:
@@ -245,16 +314,22 @@ def _signal_card(conn, row: pd.Series, followed: set[int], kind: str) -> None:
             bd = pd.DataFrame([(label, int(row[col]), mx) for col, label, mx in fc27_signals.SCORE_COMPONENTS],
                               columns=["Componente", "Puntos", "Máximo"])
             st.dataframe(bd, hide_index=True, width="stretch")
+            st.caption("Precios de consola (FUT.GG).")
             if row.get("url"):
                 st.markdown(f"[Abrir en FUT.GG ↗]({FUTGG}{row['url']})")
-        _follow_button(conn, row, followed, key=f"follow_{kind}_{row['key']}")
+        if c2 is not None:
+            with c2:
+                _follow_button(conn, row, followed, key=f"follow_{kind}_{row['key']}")
 
 
 def render_signals(conn, signals: pd.DataFrame, evaluated: pd.DataFrame, analyst: dict, now: datetime,
                    followed: set[int]) -> None:
+    tops = {k: fc27_signals.top_by_signal(signals, k) for k in ("COMPRAR", "VIGILAR", "RIESGO")}
+    ids = pd.concat(list(tops.values()))["ea_id"] if any(not v.empty for v in tops.values()) else []
+    series = fc27_history.price_series(conn, ids, now - timedelta(days=3))
     cols = st.columns(3)
     for col, kind in zip(cols, ["COMPRAR", "VIGILAR", "RIESGO"]):
-        top = fc27_signals.top_by_signal(signals, kind)
+        top = tops[kind]
         css, label = PILL[kind]
         with col:
             st.markdown(f"<span class='fc-pill {css}'>{label}</span> <span style='color:#94A3B8'>"
@@ -264,9 +339,10 @@ def render_signals(conn, signals: pd.DataFrame, evaluated: pd.DataFrame, analyst
             else:
                 st.caption("Cartas con algo de interés que aún no cumplen todas las condiciones.")
             if top.empty:
-                st.info("Ninguna carta de tu presupuesto cumple las condiciones ahora mismo.")
+                st.markdown("<div class='fc-empty'>Ninguna carta de tu presupuesto cumple las condiciones ahora "
+                            "mismo.</div>", unsafe_allow_html=True)
             for _, row in top.iterrows():
-                _signal_card(conn, row, followed, kind)
+                _signal_card(conn, row, followed, kind, series)
 
     notes = fc27_signals.active_notes(analyst, now)
     if notes:
@@ -311,12 +387,15 @@ def render_watchlist(conn, signals: pd.DataFrame) -> None:
             st.toast(f"Precios de PC guardados para {choice}", icon="💾")
             st.rerun()
 
+    trend = fc27_history.price_series(conn, wl["ea_id"], datetime.now(timezone.utc) - timedelta(days=7))
+    wl["trend"] = wl["ea_id"].map(lambda i: trend.get(int(i)) if len(trend.get(int(i), [])) >= 2 else None)
     st.dataframe(
         wl[["name", "overall", "buy_price_pc", "price_pc", "pc_net_now", "pc_net_now_pct", "pc_break_even",
-            "pc_target", "pc_stop", "signal"]],
+            "pc_target", "pc_stop", "trend", "signal"]],
         hide_index=True, width="stretch",
         column_config={
             "name": "Carta", "overall": st.column_config.NumberColumn("OVR", format="%d"),
+            "trend": st.column_config.LineChartColumn("Tendencia", width="small", help="Precio de consola en tus instantáneas de los últimos 7 días"),
             "buy_price_pc": st.column_config.NumberColumn("Compré a (PC)", format="localized"),
             "price_pc": st.column_config.NumberColumn("Vale ahora (PC)", format="localized"),
             "pc_net_now": st.column_config.NumberColumn("Si vendes ya (neto)", format="localized",
@@ -490,13 +569,18 @@ def render_market(conn, signals: pd.DataFrame, followed: set[int]) -> None:
     hidden = 4 - len(history_cols)
     st.caption(f"{len(view)} cartas. Selecciona una fila para ver su ficha."
                + (" Las columnas de 1h, 6h, 3d y 7d aparecen cuando tu historial las cubre." if hidden else ""))
+    trend = fc27_history.price_series(conn, view["ea_id"], datetime.now(timezone.utc) - timedelta(days=3))
+    view["trend"] = view["ea_id"].map(lambda i: trend.get(int(i)) if len(trend.get(int(i), [])) >= 2 else None)
     event = st.dataframe(
-        view[["followed", "name", "overall", "rarity", "price", *pct_cols, "market_score", "risk_score", "signal"]],
+        view[["followed", "name", "overall", "rarity", "price", "trend", *pct_cols, "market_score", "risk_score",
+              "signal"]],
         hide_index=True, width="stretch", height=480, on_select="rerun", selection_mode="single-row", key="mv_table",
         column_config={
             "followed": st.column_config.TextColumn("", help="⭐ = está en Mi lista", width="small"),
             "name": "Carta", "overall": st.column_config.NumberColumn("OVR", format="%d"), "rarity": "Rareza",
             "price": st.column_config.NumberColumn("Precio consola", format="localized"),
+            "trend": st.column_config.LineChartColumn("Tendencia", width="small",
+                                                      help="Precio de consola en tus instantáneas de los últimos 3 días"),
             "pct_1h": st.column_config.NumberColumn("1h %", format="%+.1f"),
             "pct_6h": st.column_config.NumberColumn("6h %", format="%+.1f"),
             "pct_24h": st.column_config.NumberColumn("24h %", format="%+.1f"),
@@ -697,8 +781,7 @@ def main() -> None:
         st.markdown("##### Tu presupuesto")
         budget = st.selectbox("Precio máximo por carta", list(BUDGETS), key="fc_budget", label_visibility="collapsed",
                               help="Filtra el resumen, las señales y la tabla de mercado (con precios de consola).")
-        st.caption("Plataforma: PC. FUT.GG solo publica abiertamente los costes de SBC en PC; los precios de cartas "
-                   "son de consola. Tus precios de PC van en ⭐ Mi lista y 📒 Operaciones.")
+        st.caption("Precios de cartas: consola (FUT.GG). Tus precios de PC: ⭐ Mi lista y 📒 Operaciones.")
     if refresh:
         _fetch_live.clear()
 
@@ -732,12 +815,16 @@ def main() -> None:
         is_fodder = all_signals["key"].str.startswith("fodder")
         signals = pd.concat([all_signals[is_fodder], _in_budget(all_signals[~is_fodder], budget)])
 
-        badge = "🟢 En vivo" if live else "🟠 Sin conexión"
-        st.markdown("<div class='fc-title'>Mercado FC 27</div>"
-                    "<div class='fc-sub'>Qué comprar, qué vigilar y qué vender hoy en Ultimate Team<br>"
-                    f"<span style='font-size:.82rem'>{badge} · FUT.GG {fc27_signals.format_when(now)} "
-                    f"({_age_text(now)}) · {fc27_history.snapshot_count(conn)} instantáneas guardadas</span></div>",
-                    unsafe_allow_html=True)
+        live_badge = ("<span class='fc-badge live'>● En vivo</span>" if live
+                      else "<span class='fc-badge off'>● Sin conexión</span>")
+        st.markdown(
+            "<div class='fc-title'>Mercado FC 27</div>"
+            "<div class='fc-sub' style='margin-bottom:0'>Qué comprar, qué vigilar y qué vender hoy en Ultimate Team</div>"
+            f"<div class='fc-badges'>{live_badge}"
+            f"<span class='fc-badge'>🕒 {fc27_signals.format_when(now)} · {_age_text(now)}</span>"
+            f"<span class='fc-badge'>🗂 {fc27_history.snapshot_count(conn)} instantáneas</span>"
+            "<span class='fc-badge'>💻 PC · cartas a precio de consola</span></div>",
+            unsafe_allow_html=True)
         if not live:
             st.warning(f"FUT.GG no respondió. Estás viendo los datos guardados {_age_text(now)}.")
         elif snap.errors:
@@ -753,8 +840,9 @@ def main() -> None:
             unsafe_allow_html=True,
         )
         for a in fc27_signals.headline_alerts(alerts, followed)[:3]:
-            show = st.error if a.level == "crítica" else st.warning
-            show(f"**{a.title}** · {a.detail}", icon="🚨" if a.level == "crítica" else "⚠️")
+            cls, icon = ("crit", "🚨") if a.level == "crítica" else ("warn", "⚠️")
+            st.markdown(f"<div class='fc-banner {cls}'><span>{icon}</span><span><b>{html.escape(a.title)}</b> · "
+                        f"{html.escape(a.detail)}</span></div>", unsafe_allow_html=True)
 
         # Etiquetas fijas (sin contadores): si cambian, Streamlit vuelve a la primera pestaña
         # después de guardar algo, y el usuario pierde dónde estaba.

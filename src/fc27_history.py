@@ -185,6 +185,27 @@ def price_history(conn: sqlite3.Connection, ea_id: int) -> pd.DataFrame:
     return df
 
 
+def price_series(conn: sqlite3.Connection, ea_ids, since: datetime) -> dict[int, list[int]]:
+    """Precios guardados de varias cartas desde `since`, en orden cronológico.
+
+    Devuelve {ea_id: [precio, precio, ...]}; las cartas sin historial no aparecen.
+    Pensado para dibujar mini-gráficos de tendencia.
+    """
+    ids = [int(i) for i in ea_ids if i is not None and not pd.isna(i)]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT p.ea_id, MIN(p.price) FROM prices p JOIN snapshots s ON s.id = p.snapshot_id "
+        f"WHERE s.fetched_at >= ? AND p.ea_id IN ({marks}) GROUP BY s.id, p.ea_id ORDER BY s.fetched_at",
+        (_iso(since), *ids),
+    ).fetchall()
+    out: dict[int, list[int]] = {}
+    for ea_id, price in rows:
+        out.setdefault(int(ea_id), []).append(int(price))
+    return out
+
+
 def _all_prices_since(conn: sqlite3.Connection, since: datetime) -> pd.DataFrame:
     df = pd.read_sql_query(
         "SELECT s.fetched_at, p.ea_id, MIN(p.price) AS price FROM prices p JOIN snapshots s ON s.id = p.snapshot_id "

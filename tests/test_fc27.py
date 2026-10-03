@@ -333,3 +333,22 @@ def test_headline_alerts_only_substitutes_and_followed_cards():
     ]
     titles = [a.title for a in fc27_signals.headline_alerts(alerts, followed={3})]
     assert titles == ["Sustituto", "Mi carta cae"]
+
+
+def test_price_series_returns_chronological_prices():
+    conn = fc27_history.connect(":memory:")
+    fc27_history.save_snapshot(conn, _snap_at(NOW - timedelta(hours=2), 100))
+    fc27_history.save_snapshot(conn, _snap_at(NOW - timedelta(hours=1), 120))
+    fc27_history.save_snapshot(conn, _snap_at(NOW, 110))
+    series = fc27_history.price_series(conn, [7, 999], NOW - timedelta(hours=3))
+    assert series == {7: [100, 120, 110]}
+    assert fc27_history.price_series(conn, [], NOW) == {}
+
+
+def test_sparkline_svg_direction_color():
+    from src import ui_theme
+    up = ui_theme.sparkline_svg([1, 2, 3])
+    down = ui_theme.sparkline_svg([3, 2, 1])
+    assert up.startswith("<svg") and ui_theme.GREEN in up
+    assert "#DC2626" in down
+    assert ui_theme.sparkline_svg([5]) == ""
