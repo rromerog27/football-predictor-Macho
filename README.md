@@ -147,7 +147,7 @@ football_predictor/
 
 | Archivo | Responsabilidad |
 |---|---|
-| `app.py` | Punto de entrada: configuración común y navegación (`st.navigation`) entre las dos páginas. |
+| `app.py` | Punto de entrada: configuración común y navegación (`st.navigation`) entre las dos páginas. Recarga los módulos de `src/` que cambiaron en disco (Streamlit Cloud puede actualizar el código sin reiniciar el proceso). |
 | `views/predictor.py` | Página del predictor: sidebar, pestañas, y llama a las funciones de `src/` para mostrar resultados. No contiene lógica de negocio. |
 | `src/data_loader.py` | Lee archivos Excel/CSV, lista hojas de Excel, descarta columnas de cuotas de apuestas cuando detecta el formato football-data.co.uk, y genera el resumen técnico del archivo (filas, columnas, faltantes, duplicados). |
 | `src/column_mapper.py` | Detecta automáticamente qué columna del archivo corresponde a cada campo canónico (equipo local, goles, fecha, etc.), con nombres alternativos como respaldo. Infiere la temporada a partir de las fechas y detecta la competición cuando hay un único valor. |
@@ -166,12 +166,16 @@ football_predictor/
 Página `views/fc27_mercado.py`. Es la página que se abre por defecto al
 ejecutar `streamlit run app.py` ("Mercado FC 27" en el menú lateral).
 
-Orden de la página: **Resumen de hoy** (mejor compra, mayor riesgo y próximo
-evento), alertas críticas y las pestañas Señales, **⭐ Mi lista** (cartas que
-sigues, con su cambio desde que las añadiste, neto del 5% de EA), Mercado
-(selecciona una fila para ver la ficha y el gráfico de precio), Fodder y SBC,
-Alertas y Cómo funciona. El selector **Tu presupuesto** de la barra lateral
-filtra el resumen, las señales y el mercado.
+Orden de la página: cabecera (mercado en vivo y última actualización),
+**Resumen de hoy** (mejor compra, mayor riesgo y próximo evento, tres tarjetas
+de la misma altura), una barra de estado (tono del mercado en 24h, cuántas
+cartas suben y bajan, y cuántas señales hay de cada tipo) y las alertas
+importantes agrupadas en un desplegable. Debajo, la navegación: **Señales**,
+**Mercado** (mapa, tabla y ficha de la carta), **Mi lista** (cartas que
+sigues, con tus precios de PC) y **Operaciones**; en **Más** están Fodder &
+SBC, Alertas y Cómo funciona. Solo se dibuja la sección abierta. El selector
+**Presupuesto** de la barra lateral filtra el resumen, las señales y el
+mercado.
 
 **Qué hace al abrirla:**
 
@@ -179,8 +183,8 @@ filtra el resumen, las señales y el mercado.
    más baratas por rating (fodder) y los SBC activos (puntos exigidos, coste
    en consola y PC, fecha de fin y carta de premio). Reutiliza la descarga
    durante ~10 minutos; el botón **Actualizar ahora** fuerza una nueva y el
-   interruptor **Actualizar sola cada 10 min** la repite mientras la página
-   esté abierta.
+   interruptor **Actualizar cada 10 min** la repite mientras la página esté
+   abierta.
 2. Guarda una instantánea en `data/fc27_market.sqlite` (máximo una cada 10
    minutos; el archivo no se versiona).
 3. Calcula para cada carta el **Market Score** (0-100), el **Risk Score**
@@ -217,17 +221,37 @@ app:
 Cada ejecución deja una línea en `data/fc27_snapshot.log` (no se versiona).
 
 **Visualizaciones.**
-- *Mapa del mercado* (pestaña Mercado): bloques agrupados por rareza; tamaño
-  según precio (escala logarítmica) y color según la variación de 24h.
+- *Señales*: filtro Todas / Comprar / Vigilar / Riesgo y rejilla de tarjetas
+  (3, 2 o 1 por fila según el ancho) ordenadas por relevancia. Cada tarjeta
+  muestra jugador, precio, señal, cambio de 24h, Market Score y Risk Score,
+  la estrategia y el historial; **Ver análisis** despliega el plan, las
+  razones y los riesgos, y **Ver ficha** abre la ficha completa con gráfico.
+- *Mapa del mercado* (Mercado): filtros de jugador, rareza, movimiento y
+  cuántas cartas ver (Top 50 por defecto, Top 100 o todas). El Top ordena por
+  relevancia (movimiento de 24h, señal, Market Score, Risk Score y precio)
+  solo para elegir qué se ve: no cambia ninguna puntuación. Bloques
+  agrupados por rareza; tamaño según precio (escala logarítmica) y color
+  según la variación de 24h; los bloques grandes muestran más datos.
+- *Tabla del mercado*: vista básica (carta, precio corto, 24h, Market,
+  Riesgo y señal) o avanzada (todas las columnas). Al seleccionar una fila se
+  abre la ficha de mercado de la carta: cifras, plan, razones, riesgos y
+  gráfico de precio.
 - *Gráfico de cada carta* (ficha en Mercado y Mi lista): rango 24h / 7 días /
   todo, niveles del plan (objetivo, stop…), eventos del calendario y tus
   compras y ventas de Operaciones.
-- *Índice de fodder* (pestaña Fodder y SBC): precio de referencia de los
-  ratings 84, 85 y 86 en tus instantáneas, normalizado a 100.
+- *Índice de fodder* (Fodder & SBC): precio de referencia de los ratings 84,
+  85 y 86 en tus instantáneas, normalizado a 100.
+
+**Diseño.** Los colores, sombras y radios están en un solo sitio:
+`TOKENS` en `src/ui_theme.py`, publicados como variables CSS `--fc-*` (verde
+= comprar/sube, amarillo = vigilar, rojo = riesgo/baja, azul = información y
+Market Score, gris = información secundaria). El tema de Streamlit
+(tipografía Inter, bordes, radios) está en `.streamlit/config.toml`. Las
+imágenes de las cartas y su nombre corto salen de la misma página de FUT.GG
+que ya se descarga; solo se muestran (no se guardan en el historial) y, si
+faltan, la carta se muestra con una insignia con su media.
 
 **Más ayudas.**
-- *🔍 Ver ficha*: en cada señal abre una ventana con el gráfico completo, el
-  plan, los motivos, los riesgos y el desglose del Market Score.
 - *🔔 Avisos de precio* (Mi lista): "avísame si baja de X / sube de Y" sobre el
   precio de consola; se muestran arriba de la página cuando se cumplen.
 - *🆕 Desde tu última visita*: SBC nuevos, señales nuevas de compra o riesgo y

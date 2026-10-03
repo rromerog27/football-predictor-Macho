@@ -6,6 +6,24 @@ primaryColor = "#1D4ED8"
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F1F5F9"
 textColor = "#0F172A"
+# Sistema visual: tipografía Inter, bordes finos y esquinas suaves en todos los widgets.
+# Los mismos valores están en src/ui_theme.py (variables CSS --fc-*), para que todo coincida.
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+headingFontWeights = [800, 700, 700, 700, 700, 700]
+baseRadius = "0.625rem"
+borderColor = "#E3E8EF"
+showWidgetBorder = true
+showSidebarBorder = true
+dataframeHeaderBackgroundColor = "#F8FAFC"
+metricValueFontSize = "1.6rem"
+blueColor = "#1D4ED8"
+greenColor = "#16A34A"
+orangeColor = "#D97706"
+redColor = "#DC2626"
+
+[theme.sidebar]
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F1F5F9"
 
 [client]
 # Menú de Streamlit reducido: sin opciones de desarrollador para el usuario final.

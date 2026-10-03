@@ -16,19 +16,21 @@ from src import fc27_history, fc27_market, fc27_signals
 NOW = datetime(2026, 10, 1, 21, 0, tzinfo=timezone.utc)
 
 
-def _mover(pct, price, ea_id, ovr, name, rarity, created):
+def _mover(pct, price, ea_id, ovr, name, rarity, created, image_id=None, card_name=None):
+    image = f',cardImagePath:"2027/futgg-player-item-card/27-{image_id}.abc.webp"' if image_id else ""
     return (
         f'$R[1]={{upgrade:null,chemistry:0,momentumPercentage:{pct},currentDbPrice:{price},showIgsBlob:!1,'
-        f'id:1,eaId:{ea_id},overall:{ovr},commonName:"{name}",cardName:"{name}",rarityName:"{rarity}",'
+        f'id:1,eaId:{ea_id},overall:{ovr},commonName:"{name}",cardName:"{card_name or name}",rarityName:"{rarity}",'
         f'url:"/players/1-x/27-{ea_id}/",uniqueClub:$R[2]={{id:4,url:"/clubs/1-x/"}},createdAt:"{created}",'
-        f'dominantColor:"0f0d0d"}},'
+        f'dominantColor:"0f0d0d"{image}}},'
     )
 
 
 MOMENTUM_HTML = "".join([
     # FUT.GG guarda la variación con el signo invertido: 6 = el precio bajó un 6%.
-    _mover(6, 920000, 50579475, 91, "Michael Olise", "Team of the week", "2026-09-23T17:00:00Z"),
-    _mover(-30, 2300000, 226764, 90, "George Best", "Base Icon", "2026-09-15T17:00:00Z"),
+    _mover(6, 920000, 50579475, 91, "Michael Olise", "Team of the week", "2026-09-23T17:00:00Z", image_id=50579475,
+           card_name="Olise"),
+    _mover(-30, 2300000, 226764, 90, "George Best", "Base Icon", "2026-09-15T17:00:00Z", image_id=999),
     _mover(-4, 60000, 241651, 87, "Viktor Gy\\u00f6keres", "Team of the week", "2026-09-30T17:00:00Z"),
     _mover("null", 1000, 1, 80, "Sin dato", "Team of the week", "2026-09-30T17:00:00Z"),
 ])
@@ -77,6 +79,16 @@ def test_parse_momentum_flips_sign_and_skips_missing(snap):
     assert movers.loc["George Best", "pct_24h"] == 30.0
     assert movers.loc["Michael Olise", "url"] == "/players/1-x/27-50579475/"
     assert "Viktor Gyökeres" in movers.index  # escapes unicode decodificados
+
+
+def test_parse_momentum_reads_display_fields(snap):
+    movers = snap.movers.set_index("name")
+    assert movers.loc["Michael Olise", "card_image"] == (
+        fc27_market.CARD_IMAGE_URL + "2027/futgg-player-item-card/27-50579475.abc.webp")
+    assert pd.isna(movers.loc["George Best", "card_image"])  # la ruta es de otra carta
+    assert pd.isna(movers.loc["Viktor Gyökeres", "card_image"])  # sin imagen en el HTML
+    assert movers.loc["Michael Olise", "card_name"] == "Olise"  # nombre corto impreso en la carta
+    assert movers.loc["Viktor Gyökeres", "card_name"] == "Viktor Gyökeres"
 
 
 def test_parse_sbcs_reads_cost_score_and_award(snap):

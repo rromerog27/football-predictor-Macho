@@ -50,6 +50,10 @@ ITEM_SCORE = {83: 410, 84: 830, 85: 2100, 86: 4100, 87: 5500, 88: 8300, 89: 1100
 ITEM_SCORE_VERIFIED = {84, 85, 86, 87, 88, 90}
 
 MOVER_COLUMNS = ["ea_id", "name", "overall", "rarity", "price", "pct_24h", "url", "created_at"]
+# Columnas solo para mostrar (no se guardan en el historial): la imagen de la carta tal como la
+# pinta FUT.GG (la variante de 300 px que usa su propia web) y el nombre corto impreso en la carta.
+DISPLAY_COLUMNS = ["card_image", "card_name"]
+CARD_IMAGE_URL = "https://game-assets.fut.gg/cdn-cgi/image/quality=85,format=auto,width=300/"
 CHEAPEST_COLUMNS = ["ea_id", "name", "overall", "price"]
 SBC_COLUMNS = [
     "slug", "name", "category", "url", "end_time", "created_at", "repeatable",
@@ -125,7 +129,9 @@ def parse_momentum(html: str) -> pd.DataFrame:
         ea_id = _to_int(_first(r"eaId:(\d+),overall:", chunk))
         if pct in (None, "null") or price is None or ea_id is None:
             continue
-        name = _first(r"commonName:" + _STR, chunk) or _first(r"cardName:" + _STR, chunk)
+        card_name = _first(r"cardName:" + _STR, chunk)
+        name = _first(r"commonName:" + _STR, chunk) or card_name
+        image = _first(r'cardImagePath:"([^"]+)"', chunk)
         rows.append({
             "ea_id": ea_id,
             "name": _unescape(name) if name else str(ea_id),
@@ -135,8 +141,11 @@ def parse_momentum(html: str) -> pd.DataFrame:
             "pct_24h": round(-float(pct), 2),
             "url": _first(r'url:"(/players/[^"]+)"', chunk),
             "created_at": _first(r'createdAt:"([^"]+)"', chunk),
+            # Solo si la ruta es de esta misma carta (el nombre del archivo lleva su eaId).
+            "card_image": CARD_IMAGE_URL + image if image and f"-{ea_id}." in image else None,
+            "card_name": _unescape(card_name) if card_name else None,
         })
-    df = pd.DataFrame(rows, columns=MOVER_COLUMNS)
+    df = pd.DataFrame(rows, columns=[*MOVER_COLUMNS, *DISPLAY_COLUMNS])
     return df.drop_duplicates("ea_id").reset_index(drop=True)
 
 

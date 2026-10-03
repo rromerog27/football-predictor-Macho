@@ -9,7 +9,8 @@ los primitivos nativos de Streamlit directamente en `app.py`.
 
 Paleta: azul, verde, blanco y gris (pedido explícito del usuario), con roles
 fijos (fondo, tinta primaria/secundaria, bordes) para que todo el dashboard
-se sienta consistente. Las tarjetas usan un fondo claro explícito a propósito
+se sienta consistente. `TOKENS` publica esos roles como variables CSS
+(`--fc-*`) que comparten todas las páginas. Las tarjetas usan un fondo claro explícito a propósito
 —no reaccionan al tema Light/Dark de Streamlit— porque así se leen igual de
 bien sobre cualquiera de los dos fondos, en vez de intentar adivinar el
 contraste correcto para cada combinación.
@@ -36,52 +37,93 @@ GRAY_50 = "#F8FAFC"
 GRAY_100 = "#F1F5F9"
 GRAY_200 = "#E2E8F0"
 WHITE = "#FFFFFF"
+AMBER = "#D97706"
+RED = "#DC2626"
+
+# --------------------------------------------------------------------------
+# Tokens del sistema visual
+# --------------------------------------------------------------------------
+# Un único sitio para los colores: se publican como variables CSS (--fc-*) para
+# el HTML de las páginas y se usan como constantes de Python en los gráficos de
+# Plotly (que no leen CSS). El color comunica: verde = comprar/sube, amarillo =
+# vigilar/precaución, rojo = riesgo/baja, azul = información y Market Score,
+# gris = información secundaria. Los mismos valores están en .streamlit/config.toml.
+
+TOKENS = {
+    "bg": "#F4F6FA",             # lienzo de la página
+    "surface": WHITE,            # tarjetas
+    "surface-2": GRAY_50,        # superficies secundarias dentro de una tarjeta
+    "border": "#E3E8EF",
+    "border-strong": "#CBD5E1",
+    "text": INK_900,
+    "muted": INK_600,
+    "faint": INK_400,
+    "blue": BLUE, "blue-soft": "#EEF3FF", "blue-ink": BLUE_DARK,
+    "green": GREEN, "green-soft": "#ECFBF1", "green-ink": "#166534",
+    "yellow": AMBER, "yellow-soft": "#FFF6E5", "yellow-ink": "#92400E",
+    "red": RED, "red-soft": "#FEF1F1", "red-ink": "#991B1B",
+    "radius": "14px",
+    "radius-sm": "10px",
+    "shadow": "0 1px 2px rgba(15,23,42,.04), 0 1px 3px rgba(15,23,42,.06)",
+    "shadow-hover": "0 8px 20px -6px rgba(15,23,42,.14), 0 2px 4px rgba(15,23,42,.05)",
+    "ease": ".15s ease",
+}
+BORDER = TOKENS["border"]
+GRID = "#EEF2F7"            # líneas de cuadrícula de los gráficos
+FONT = "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif"
 
 
 def inject_global_css() -> str:
-    """CSS global: chrome de Streamlit, tipografía, tabs, botones y las
-    clases `.fp-*` que usan los componentes de este módulo."""
+    """CSS global: variables del sistema visual, chrome de Streamlit, tabs,
+    botones y las clases `.fp-*` que usan los componentes de este módulo."""
+    tokens = "".join(f"--fc-{name}: {value};" for name, value in TOKENS.items())
     return f"""
     <style>
-    /* -- Chrome de Streamlit: oculta el footer y el botón Deploy; deja el
-       menú hamburguesa visible (ahí vive el selector de tema Light/Dark). -- */
-    footer {{ visibility: hidden; }}
-    [data-testid="stAppDeployButton"] {{ display: none; }}
+    :root {{ {tokens} }}
 
-    /* -- Tipografía base -- */
-    html, body, [class*="css"] {{
-        font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    /* -- Chrome de Streamlit: fuera el menú, el botón Deploy, las acciones de la
+       barra (Share, GitHub… de Streamlit Cloud) y el footer. Se mantienen el botón
+       para abrir la barra lateral y el indicador de "ejecutando". -- */
+    [data-testid="stToolbarActions"], [data-testid="stAppDeployButton"], [data-testid="stMainMenu"] {{
+        display: none !important;
     }}
+    header[data-testid="stHeader"] {{ background: transparent; }}
+    footer {{ display: none !important; }}
+    [data-testid="stMainBlockContainer"] {{ padding-top: 2.5rem; padding-bottom: 4rem; max-width: 1440px; }}
 
     /* -- Tarjetas nativas st.metric: mismo lenguaje visual que las nuevas -- */
     div[data-testid="stMetric"] {{
-        background-color: {WHITE};
-        border: 1px solid {GRAY_200};
-        border-radius: 14px;
+        background-color: var(--fc-surface);
+        border: 1px solid var(--fc-border);
+        border-radius: var(--fc-radius);
         padding: 14px 18px 10px 18px;
-        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+        box-shadow: var(--fc-shadow);
     }}
-    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p {{ color: {INK_600} !important; }}
-    div[data-testid="stMetricValue"], div[data-testid="stMetricValue"] p {{ color: {INK_900} !important; font-weight: 700; }}
+    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p {{ color: var(--fc-muted) !important; }}
+    div[data-testid="stMetricValue"], div[data-testid="stMetricValue"] p {{ color: var(--fc-text) !important; font-weight: 700; }}
 
-    /* -- Botones primarios (Ejecutar análisis, etc.) -- */
-    button[kind="primary"] {{
-        background: linear-gradient(135deg, {BLUE} 0%, {GREEN} 100%) !important;
-        border: none !important;
-        box-shadow: 0 2px 8px rgba(29, 78, 216, 0.25);
+    /* -- Botones: transición corta y elevación de 1px al pasar el ratón -- */
+    [data-testid^="stBaseButton-primary"], [data-testid^="stBaseButton-secondary"], [data-testid^="stBaseLinkButton"] {{
+        transition: background-color var(--fc-ease), border-color var(--fc-ease), box-shadow var(--fc-ease),
+                    transform var(--fc-ease);
+    }}
+    [data-testid^="stBaseButton-primary"]:hover:not(:disabled), [data-testid^="stBaseButton-secondary"]:hover:not(:disabled),
+    [data-testid^="stBaseLinkButton"]:hover {{
+        transform: translateY(-1px);
+        box-shadow: var(--fc-shadow-hover);
     }}
 
     /* -- Navegación superior (st.tabs) en estilo píldora -- */
     div[data-testid="stTabs"] div[role="tablist"] {{
         gap: 4px;
-        border-bottom: 1px solid {GRAY_200};
+        border-bottom: 1px solid var(--fc-border);
     }}
     div[data-testid="stTabs"] div[data-testid="stTab"] {{
         height: 44px;
         border-radius: 10px 10px 0 0;
         padding: 0 18px;
         font-weight: 600;
-        color: {INK_600};
+        color: var(--fc-muted);
     }}
     div[data-testid="stTabs"] div[data-testid="stTab"][aria-selected="true"] {{
         color: {BLUE};
@@ -365,7 +407,7 @@ def sparkline_svg(values: list[float], width: int = 120, height: int = 32, color
     step = (width - 2 * pad) / (len(vals) - 1)
     pts = [(pad + i * step, pad + (height - 2 * pad) * (1 - (v - lo) / span)) for i, v in enumerate(vals)]
     if color is None:
-        color = GREEN if vals[-1] > vals[0] else ("#DC2626" if vals[-1] < vals[0] else INK_400)
+        color = GREEN if vals[-1] > vals[0] else (RED if vals[-1] < vals[0] else INK_400)
     line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
     area = f"{pad},{height - pad} " + line + f" {pts[-1][0]:.1f},{height - pad}"
     ex, ey = pts[-1]
