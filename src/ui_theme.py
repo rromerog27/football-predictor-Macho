@@ -347,3 +347,33 @@ def sidebar_block_title(icon: str, title: str) -> str:
     """Título pequeño en mayúsculas para el encabezado de un bloque de la
     barra lateral (se usa dentro de un `st.sidebar.container(border=True)`)."""
     return f'<div class="fp-sidebar-block-title">{icon} {html.escape(title)}</div>'
+
+
+def sparkline_svg(values: list[float], width: int = 120, height: int = 32, color: str | None = None) -> str:
+    """Mini-gráfico de línea en SVG (sin ejes) para incrustar en HTML.
+
+    El color sigue la dirección: verde si el último valor supera al primero,
+    rojo si queda por debajo y gris si no cambia. Con menos de dos valores
+    devuelve una cadena vacía.
+    """
+    vals = [float(v) for v in values if v is not None]
+    if len(vals) < 2:
+        return ""
+    lo, hi = min(vals), max(vals)
+    span = (hi - lo) or 1.0
+    pad = 3
+    step = (width - 2 * pad) / (len(vals) - 1)
+    pts = [(pad + i * step, pad + (height - 2 * pad) * (1 - (v - lo) / span)) for i, v in enumerate(vals)]
+    if color is None:
+        color = GREEN if vals[-1] > vals[0] else ("#DC2626" if vals[-1] < vals[0] else INK_400)
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area = f"{pad},{height - pad} " + line + f" {pts[-1][0]:.1f},{height - pad}"
+    ex, ey = pts[-1]
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" '
+        f'aria-label="Tendencia de precio">'
+        f'<polygon points="{area}" fill="{color}" fill-opacity="0.10"/>'
+        f'<polyline points="{line}" fill="none" stroke="{color}" stroke-width="2" '
+        f'stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<circle cx="{ex:.1f}" cy="{ey:.1f}" r="2.6" fill="{color}"/></svg>'
+    )
