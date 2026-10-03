@@ -33,6 +33,7 @@ MOMENTUM_HTML = "".join([
     _mover(-30, 2300000, 226764, 90, "George Best", "Base Icon", "2026-09-15T17:00:00Z", image_id=999),
     _mover(-4, 60000, 241651, 87, "Viktor Gy\\u00f6keres", "Team of the week", "2026-09-30T17:00:00Z"),
     _mover("null", 1000, 1, 80, "Sin dato", "Team of the week", "2026-09-30T17:00:00Z"),
+    _mover(-1, 0, 2, 89, "Sin precio", "Team of the week", "2026-09-30T17:00:00Z"),
 ])
 
 CHEAPEST_HTML = (
@@ -74,7 +75,7 @@ def snap() -> fc27_market.MarketSnapshot:
 
 def test_parse_momentum_flips_sign_and_skips_missing(snap):
     movers = snap.movers.set_index("name")
-    assert len(movers) == 3  # la carta con momentum null se descarta
+    assert len(movers) == 3  # se descartan la carta con momentum null y la de precio 0
     assert movers.loc["Michael Olise", "pct_24h"] == -6.0
     assert movers.loc["George Best", "pct_24h"] == 30.0
     assert movers.loc["Michael Olise", "url"] == "/players/1-x/27-50579475/"

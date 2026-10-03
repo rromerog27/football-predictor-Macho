@@ -127,7 +127,8 @@ def parse_momentum(html: str) -> pd.DataFrame:
         pct = _first(r"^momentumPercentage:(-?[\d.]+|null)", chunk)
         price = _to_int(_first(r"currentDbPrice:(\d+|null)", chunk))
         ea_id = _to_int(_first(r"eaId:(\d+),overall:", chunk))
-        if pct in (None, "null") or price is None or ea_id is None:
+        # Precio 0 = FUT.GG no tiene precio de mercado para la carta: se trata como dato que falta.
+        if pct in (None, "null") or not price or ea_id is None:
             continue
         card_name = _first(r"cardName:" + _STR, chunk)
         name = _first(r"commonName:" + _STR, chunk) or card_name
