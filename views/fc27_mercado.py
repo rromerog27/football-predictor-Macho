@@ -103,6 +103,8 @@ st.markdown(
     .fc-spark {{ display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:.75rem; color:{ui_theme.INK_400}; }}
     .fc-planline {{ font-size:.84rem; line-height:1.5; color:{ui_theme.INK_900}; }}
     .fc-planline span {{ color:{ui_theme.INK_600}; }}
+    .fc-since {{ background:#EFF6FF; border:1px solid #BFDBFE; color:#1E3A8A; border-radius:10px; padding:8px 14px;
+                 font-size:.88rem; margin:.2rem 0 .6rem 0; }}
     .fc-empty {{ border:1px dashed {ui_theme.GRAY_200}; border-radius:12px; padding:14px 16px; color:{ui_theme.INK_600};
                 font-size:.88rem; background:{ui_theme.GRAY_50}; }}
     </style>
@@ -296,6 +298,42 @@ def _calibration_text(evaluated: pd.DataFrame, kind: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def render_since_last_visit(conn, snap: fc27_market.MarketSnapshot, alerts: list, previous: datetime | None) -> None:
+    """Resumen de lo que pasó mientras no estabas: SBC nuevos, señales nuevas y avisos de precio."""
+    if previous is None:
+        return
+    new_sbcs = []
+    if not snap.sbcs.empty:
+        created = pd.to_datetime(snap.sbcs["created_at"], utc=True, errors="coerce")
+        new_sbcs = list(snap.sbcs.loc[created >= previous, "name"])
+    new_sig = fc27_history.signals_since(conn, previous)
+    buys = list(new_sig.loc[new_sig["kind"] == "COMPRAR", "name"]) if not new_sig.empty else []
+    risks = list(new_sig.loc[new_sig["kind"] == "RIESGO", "name"]) if not new_sig.empty else []
+    price_hits = [a.title for a in alerts if a.category == "precio"]
+    when = _age_text(previous)
+    parts = []
+    if new_sbcs:
+        parts.append(f"<b>{len(new_sbcs)}</b> SBC nuevos")
+    if buys:
+        parts.append(f"<b>{len(buys)}</b> nuevas compras")
+    if risks:
+        parts.append(f"<b>{len(risks)}</b> nuevos riesgos")
+    if price_hits:
+        parts.append(f"<b>{len(price_hits)}</b> avisos de precio")
+    if not parts:
+        st.markdown(f"<div class='fc-since'>🆕 Desde tu última visita ({when}): sin novedades importantes.</div>",
+                    unsafe_allow_html=True)
+        return
+    st.markdown(f"<div class='fc-since'>🆕 <b>Desde tu última visita</b> ({when}): {' · '.join(parts)}</div>",
+                unsafe_allow_html=True)
+    with st.expander("Ver novedades"):
+        for title, items in (("SBC nuevos", new_sbcs), ("Nuevas señales de compra", buys),
+                             ("Nuevas señales de riesgo", risks), ("Avisos de precio", price_hits)):
+            if items:
+                st.markdown(f"**{title}:** " + ", ".join(html.escape(str(i)) for i in items[:15])
+                            + (f" y {len(items) - 15} más" if len(items) > 15 else ""))
+
+
 def render_today(signals: pd.DataFrame, events: pd.DataFrame, now: datetime) -> None:
     buy = fc27_signals.top_by_signal(signals, "COMPRAR", 1)
     risk = fc27_signals.top_by_signal(signals, "RIESGO", 1)
@@ -355,7 +393,54 @@ def _meter(value: int, color: str) -> str:
     return f"<div class='fc-meter'><i style='width:{max(0, min(100, int(value)))}%;background:{color}'></i></div>"
 
 
-def _signal_card(conn, row: pd.Series, followed: set[int], kind: str, series: dict[int, list[int]]) -> None:
+@st.dialog("Ficha de la carta", width="large")
+def card_dialog(conn, row: pd.Series, followed: set[int], analyst: dict) -> None:
+    """Ficha completa en una ventana emergente: cifras, gráfico, plan, motivos y desglose."""
+    kind = row["signal"] if row["signal"] in PILL else None
+    pill = (f"<span class='fc-pill {PILL[kind][0]}'>{PILL[kind][1]}</span>" if kind
+            else "<span class='fc-chip'>Sin señal</span>")
+    st.markdown(f"<div class='fc-sig-top'>{_ovr_badge(row)}<div class='fc-sig-id'>"
+                f"<div class='fc-sig-name' style='font-size:1.2rem'>{html.escape(_card_title(row))}</div>"
+                f"<div class='fc-sig-meta'>{html.escape(str(row['rarity']))} · {row['label']} · horizonte "
+                f"{row['horizon']}</div></div>{pill}</div>", unsafe_allow_html=True)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Precio (consola)", _fmt(row["price"]))
+    m2.metric("24h", "—" if pd.isna(row["pct_24h"]) else f"{row['pct_24h']:+.1f}%")
+    m3.metric("Market Score", int(row["market_score"]))
+    m4.metric("Riesgo", int(row["risk_score"]))
+    if not _is_fodder(row) and not pd.isna(row["ea_id"]):
+        _price_chart(conn, int(row["ea_id"]), key=f"dlg_{row['key']}", row=row, analyst=analyst, height=300)
+    plan = fc27_signals.trade_plan(row)
+    st.markdown(f"<div class='fc-plan'><span>Entrada:</span> {html.escape(plan['zona'])}<br>"
+                f"<span>Objetivo:</span> {html.escape(plan['objetivo'])}<br>"
+                f"<span>Invalidación:</span> {html.escape(plan['invalidacion'])}</div>", unsafe_allow_html=True)
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Por qué**")
+        for r in row["reasons"]:
+            st.markdown(f"✅ {r}")
+        if not row["reasons"]:
+            st.caption("Sin motivos destacados.")
+        st.markdown("**Riesgos**")
+        for r in row["risks"]:
+            st.markdown(f"⚠️ {r}")
+        if not row["risks"]:
+            st.caption("Sin riesgos destacados.")
+    with right:
+        bd = pd.DataFrame([(label, int(row[col]), mx) for col, label, mx in fc27_signals.SCORE_COMPONENTS],
+                          columns=["Componente", "Puntos", "Máximo"])
+        st.dataframe(bd, hide_index=True, width="stretch",
+                     column_config={"Puntos": st.column_config.ProgressColumn("Puntos", min_value=0, max_value=20,
+                                                                              format="%d")})
+    b1, b2 = st.columns(2)
+    with b1:
+        _follow_button(conn, row, followed, key=f"dlg_follow_{row['key']}")
+    if row.get("url"):
+        b2.link_button("Abrir en FUT.GG ↗", f"{FUTGG}{row['url']}", width="stretch")
+
+
+def _signal_card(conn, row: pd.Series, followed: set[int], kind: str, series: dict[int, list[int]],
+                 analyst: dict) -> None:
     with st.container(border=True):
         css, label = PILL[kind]
         meta = "Mejor fodder para SBC" if _is_fodder(row) else html.escape(str(row["rarity"]))
@@ -385,20 +470,9 @@ def _signal_card(conn, row: pd.Series, followed: set[int], kind: str, series: di
             unsafe_allow_html=True,
         )
         c1, c2 = st.columns([3, 2]) if not _is_fodder(row) else (st.container(), None)
-        with c1, st.expander("Análisis"):
-            if row["reasons"]:
-                st.markdown("**Por qué**\n" + "\n".join(f"- {r}" for r in row["reasons"]))
-            if row["risks"]:
-                st.markdown("**Riesgos**\n" + "\n".join(f"- {r}" for r in row["risks"]))
-            changes = " · ".join(f"{lbl} {_pct_html(row[col])}" for col, lbl in
-                                 [("pct_1h", "1h"), ("pct_6h", "6h"), ("pct_24h", "24h"), ("pct_168h", "7d")])
-            st.markdown(f"Variación: {changes}", unsafe_allow_html=True)
-            bd = pd.DataFrame([(label, int(row[col]), mx) for col, label, mx in fc27_signals.SCORE_COMPONENTS],
-                              columns=["Componente", "Puntos", "Máximo"])
-            st.dataframe(bd, hide_index=True, width="stretch")
-            st.caption("Precios de consola (FUT.GG).")
-            if row.get("url"):
-                st.markdown(f"[Abrir en FUT.GG ↗]({FUTGG}{row['url']})")
+        with c1:
+            if st.button("🔍 Ver ficha", key=f"card_{kind}_{row['key']}", width="stretch"):
+                card_dialog(conn, row, followed, analyst)
         if c2 is not None:
             with c2:
                 _follow_button(conn, row, followed, key=f"follow_{kind}_{row['key']}")
@@ -424,7 +498,7 @@ def render_signals(conn, signals: pd.DataFrame, evaluated: pd.DataFrame, analyst
                 st.markdown("<div class='fc-empty'>Ninguna carta de tu presupuesto cumple las condiciones ahora "
                             "mismo.</div>", unsafe_allow_html=True)
             for _, row in top.iterrows():
-                _signal_card(conn, row, followed, kind, series)
+                _signal_card(conn, row, followed, kind, series, analyst)
 
     notes = fc27_signals.active_notes(analyst, now)
     if notes:
@@ -507,6 +581,34 @@ def render_watchlist(conn, signals: pd.DataFrame, analyst: dict) -> None:
             },
         )
 
+    st.markdown("##### 🔔 Avisos de precio")
+    st.caption("Te avisa arriba de la página cuando el precio de consola de FUT.GG cruza tu límite. Se comprueba "
+               "con cada instantánea; déjalo vacío para no avisar.")
+    alert_labels = {f"{r['name']} {'' if pd.isna(r['overall']) else int(r['overall'])}".strip(): r
+                    for _, r in wl.iterrows()}
+    with st.form("price_alerts_form", border=True):
+        a1, a2, a3, a4 = st.columns([2.2, 1.3, 1.3, 1])
+        pick = a1.selectbox("Carta", list(alert_labels), key="alert_card")
+        r = alert_labels[pick]
+        below = a2.number_input("Avisar si baja de", min_value=0, step=500, key=f"al_below_{r['ea_id']}",
+                                value=None if pd.isna(r["alert_below"]) else int(r["alert_below"]),
+                                placeholder=f"Ahora {_fmt_short(r['last_price'])}")
+        above = a3.number_input("Avisar si sube de", min_value=0, step=500, key=f"al_above_{r['ea_id']}",
+                                value=None if pd.isna(r["alert_above"]) else int(r["alert_above"]),
+                                placeholder=f"Ahora {_fmt_short(r['last_price'])}")
+        a4.write("")
+        if a4.form_submit_button("Guardar aviso", type="primary", width="stretch"):
+            fc27_history.set_price_alerts(conn, int(r["ea_id"]), below or None, above or None)
+            st.toast(f"Aviso guardado para {pick}", icon="🔔")
+            st.rerun()
+    active = wl[wl["alert_below"].notna() | wl["alert_above"].notna()]
+    if not active.empty:
+        st.dataframe(active[["name", "last_price", "alert_below", "alert_above"]], hide_index=True, width="stretch",
+                     column_config={"name": "Carta",
+                                    "last_price": st.column_config.NumberColumn("Último (consola)", format="localized"),
+                                    "alert_below": st.column_config.NumberColumn("Baja de", format="localized"),
+                                    "alert_above": st.column_config.NumberColumn("Sube de", format="localized")})
+
     names = {f"{r['name']} {'' if pd.isna(r['overall']) else int(r['overall'])}".strip(): int(r["ea_id"])
              for _, r in wl.iterrows()}
     c1, c2 = st.columns([3, 1])
@@ -522,6 +624,38 @@ def render_watchlist(conn, signals: pd.DataFrame, analyst: dict) -> None:
 OTHER_CARD = "✏️ Otra carta (escribir nombre)"
 
 
+def render_equity_curve(df: pd.DataFrame) -> None:
+    """Beneficio neto acumulado (PC) a lo largo de tus ventas, con la caída desde el máximo."""
+    curve = fc27_history.equity_curve(df)
+    if curve.empty:
+        return
+    # Punto de partida en 0 el día de la primera compra: la curva se lee aunque haya una sola venta.
+    first_buy = pd.to_datetime(df.loc[df["status"] == "Cerrada", "buy_at"], utc=True).min()
+    origin = pd.DataFrame([{"sell_at": min(first_buy, curve["sell_at"].min()), "card_name": "Inicio",
+                            "net_profit": 0, "cumulative": 0, "peak": 0, "drawdown": 0}])
+    curve = pd.concat([origin, curve], ignore_index=True)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=curve["sell_at"], y=curve["cumulative"], mode="lines+markers", name="Beneficio acumulado",
+        line=dict(color=ui_theme.BLUE, width=2, shape="hv"), marker=dict(size=7),
+        customdata=curve[["card_name", "net_profit"]],
+        hovertemplate="%{x|%d %b %H:%M}<br>%{customdata[0]}: %{customdata[1]:+,.0f}<br>"
+                      "Acumulado %{y:+,.0f}<extra></extra>",
+    ))
+    if (curve["drawdown"] < 0).any():
+        fig.add_trace(go.Scatter(
+            x=curve["sell_at"], y=curve["drawdown"], mode="lines", name="Caída desde el máximo",
+            line=dict(color="#DC2626", width=1, shape="hv"), fill="tozeroy", fillcolor="rgba(220,38,38,0.10)",
+            hovertemplate="%{x|%d %b}<br>Caída %{y:,.0f}<extra></extra>",
+        ))
+    fig.add_hline(y=0, line=dict(color="#94A3B8", width=1))
+    fig.update_layout(template="plotly_white", height=260, margin=dict(t=10, b=30, l=60, r=10), separators=",.",
+                      yaxis=dict(title="Monedas (PC, neto)", gridcolor="#EEF2F7"), xaxis=dict(gridcolor="#EEF2F7"),
+                      legend=dict(orientation="h", y=1.12, x=0), hovermode="x unified")
+    st.markdown("##### 💰 Curva de beneficio")
+    st.plotly_chart(fig, width="stretch", key="equity_curve")
+
+
 def render_trades(conn, signals: pd.DataFrame) -> None:
     df = fc27_history.trades(conn)
     s = fc27_history.trade_summary(df)
@@ -532,6 +666,7 @@ def render_trades(conn, signals: pd.DataFrame) -> None:
     c3.metric("Operaciones ganadoras", "—" if s["win_rate_pct"] is None else f"{s['win_rate_pct']:.0f}%")
     c4.metric("Invertido en abiertas", _fmt(s["capital_in_open"]), f"{s['open']} abiertas", delta_color="off")
     st.caption(f"Precios de PC por unidad, como en el juego. Impuesto de EA pagado en ventas: {_fmt(s['taxes_paid'])}.")
+    render_equity_curve(df)
 
     left, right = st.columns(2)
     with left, st.form("trade_buy", border=True, clear_on_submit=True):
@@ -977,6 +1112,9 @@ def main() -> None:
         alerts = fc27_signals.build_alerts(snap, all_signals, changes, analyst, now)
         events = fc27_signals.upcoming_events(analyst, now)
         followed = fc27_history.watchlist_ids(conn)
+        alerts = fc27_signals.price_alert_hits(fc27_history.watchlist(conn)) + alerts
+        if "fc_prev_visit" not in st.session_state:  # una vez por sesión del navegador
+            st.session_state["fc_prev_visit"] = fc27_history.start_visit(conn, datetime.now(timezone.utc))
 
         is_fodder = all_signals["key"].str.startswith("fodder")
         signals = pd.concat([all_signals[is_fodder], _in_budget(all_signals[~is_fodder], budget)])
@@ -996,6 +1134,7 @@ def main() -> None:
         elif snap.errors:
             st.warning("Algunas páginas de FUT.GG fallaron; los datos pueden estar incompletos.")
 
+        render_since_last_visit(conn, snap, alerts, st.session_state.get("fc_prev_visit"))
         render_today(signals, events, now)
 
         counts = signals["signal"].value_counts()
@@ -1007,6 +1146,8 @@ def main() -> None:
         )
         for a in fc27_signals.headline_alerts(alerts, followed)[:3]:
             cls, icon = ("crit", "🚨") if a.level == "crítica" else ("warn", "⚠️")
+            if a.category == "precio":
+                icon = "🔔"
             st.markdown(f"<div class='fc-banner {cls}'><span>{icon}</span><span><b>{html.escape(a.title)}</b> · "
                         f"{html.escape(a.detail)}</span></div>", unsafe_allow_html=True)
 

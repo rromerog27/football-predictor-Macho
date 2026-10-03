@@ -368,3 +368,39 @@ def test_plan_levels_match_signal():
     assert fc27_signals.plan_levels({"price": 1000, "signal": "COMPRAR"}) == pytest.approx({"Objetivo": 1150, "Stop": 900})
     assert set(fc27_signals.plan_levels({"price": 1000, "signal": "RIESGO"})) == {"Caída posible", "Invalidación"}
     assert fc27_signals.plan_levels({"price": 1000, "signal": None}) == {}
+
+
+def test_equity_curve_and_drawdown():
+    conn = fc27_history.connect(":memory:")
+    a = fc27_history.open_trade(conn, "A", 1000, NOW)
+    b = fc27_history.open_trade(conn, "B", 1000, NOW)
+    fc27_history.close_trade(conn, a, 2000, NOW + timedelta(days=1))   # +900
+    fc27_history.close_trade(conn, b, 500, NOW + timedelta(days=2))    # −525
+    curve = fc27_history.equity_curve(fc27_history.trades(conn))
+    assert list(curve["cumulative"]) == [900, 375]
+    assert list(curve["drawdown"]) == [0, -525]
+
+
+def test_price_alerts_fire_on_last_price():
+    conn = fc27_history.connect(":memory:")
+    fc27_history.save_snapshot(conn, _snap_at(NOW, 95_000))
+    fc27_history.add_to_watchlist(conn, {"ea_id": 7, "name": "Test", "overall": 88, "price": 100_000}, NOW)
+    fc27_history.set_price_alerts(conn, 7, below=96_000, above=None)
+    hits = fc27_signals.price_alert_hits(fc27_history.watchlist(conn))
+    assert len(hits) == 1 and hits[0].category == "precio" and hits[0].ea_id == 7
+    assert fc27_signals.headline_alerts(hits, followed={7}) == hits   # sale arriba para cartas seguidas
+    fc27_history.set_price_alerts(conn, 7, below=90_000, above=200_000)
+    assert fc27_signals.price_alert_hits(fc27_history.watchlist(conn)) == []
+
+
+def test_visits_and_new_signals_since_last_visit():
+    conn = fc27_history.connect(":memory:")
+    assert fc27_history.start_visit(conn, NOW) is None
+    assert fc27_history.start_visit(conn, NOW + timedelta(hours=5)) == NOW
+    old = pd.DataFrame([{"key": "card:1", "ea_id": 1, "name": "Viejo", "signal": "COMPRAR", "price": 100,
+                         "market_score": 75, "risk_score": 30, "horizon_h": 72}])
+    fc27_history.record_signals(conn, old, NOW - timedelta(days=1))
+    fc27_history.record_signals(conn, old, NOW + timedelta(hours=1))            # se repite: no es novedad
+    new = old.assign(key="card:2", ea_id=2, name="Nuevo")
+    fc27_history.record_signals(conn, new, NOW + timedelta(hours=2))
+    assert list(fc27_history.signals_since(conn, NOW)["name"]) == ["Nuevo"]

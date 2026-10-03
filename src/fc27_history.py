@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS watchlist (
     added_at TEXT NOT NULL,
     added_price INTEGER
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     card_name TEXT NOT NULL,
@@ -104,7 +108,8 @@ def connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
 
 # Columnas añadidas después de la primera versión del historial. Se agregan a
 # bases ya existentes sin perder datos.
-_WATCHLIST_EXTRA_COLUMNS = {"buy_price_pc": "INTEGER", "price_pc": "INTEGER", "price_pc_at": "TEXT"}
+_WATCHLIST_EXTRA_COLUMNS = {"buy_price_pc": "INTEGER", "price_pc": "INTEGER", "price_pc_at": "TEXT",
+                            "alert_below": "INTEGER", "alert_above": "INTEGER"}
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -294,6 +299,44 @@ def remove_from_watchlist(conn: sqlite3.Connection, ea_id: int) -> None:
         conn.execute("DELETE FROM watchlist WHERE ea_id = ?", (int(ea_id),))
 
 
+def set_price_alerts(conn: sqlite3.Connection, ea_id: int, below, above) -> None:
+    """Avisos de precio de una carta de Mi lista (precio de consola de FUT.GG):
+    avisar si baja de `below` o sube de `above`. None quita el aviso."""
+    with conn:
+        conn.execute("UPDATE watchlist SET alert_below = ?, alert_above = ? WHERE ea_id = ?",
+                     (_int_or_none(below), _int_or_none(above), int(ea_id)))
+
+
+def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    with conn:
+        conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                     (key, value))
+
+
+def start_visit(conn: sqlite3.Connection, now: datetime) -> datetime | None:
+    """Registra una visita nueva y devuelve cuándo fue la anterior (None si es la primera)."""
+    previous = get_meta(conn, "last_visit")
+    set_meta(conn, "last_visit", _iso(now))
+    return _parse(previous) if previous else None
+
+
+def signals_since(conn: sqlite3.Connection, since: datetime) -> pd.DataFrame:
+    """Señales COMPRAR/RIESGO registradas desde `since` cuya carta no tenía esa misma
+    señal antes (las novedades reales, no las que se repiten en cada instantánea)."""
+    df = pd.read_sql_query("SELECT created_at, key, ea_id, name, kind, price FROM signals", conn)
+    if df.empty:
+        return df
+    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+    before = set(zip(df.loc[df["created_at"] < since, "key"], df.loc[df["created_at"] < since, "kind"]))
+    new = df[(df["created_at"] >= since) & ~df.apply(lambda r: (r["key"], r["kind"]) in before, axis=1)]
+    return new.drop_duplicates(["key", "kind"]).reset_index(drop=True)
+
+
 def watchlist_ids(conn: sqlite3.Connection) -> set[int]:
     return {row[0] for row in conn.execute("SELECT ea_id FROM watchlist")}
 
@@ -435,6 +478,25 @@ def trade_summary(df: pd.DataFrame) -> dict:
         "taxes_paid": round(float((closed["sell_price"] * EA_TAX * closed["quantity"]).sum())) if len(closed) else 0,
         "capital_in_open": round(float(open_["cost"].sum())) if len(open_) else 0,
     }
+
+
+def equity_curve(df: pd.DataFrame) -> pd.DataFrame:
+    """Beneficio neto acumulado por fecha de venta (solo operaciones cerradas).
+
+    Columnas: sell_at, card_name, net_profit, cumulative, peak, drawdown
+    (distancia al máximo anterior, ≤ 0).
+    """
+    cols = ["sell_at", "card_name", "net_profit", "cumulative", "peak", "drawdown"]
+    closed = df[df["status"] == "Cerrada"] if not df.empty else df
+    if closed.empty:
+        return pd.DataFrame(columns=cols)
+    out = closed[["sell_at", "card_name", "net_profit"]].copy()
+    out["sell_at"] = pd.to_datetime(out["sell_at"], utc=True)
+    out = out.sort_values("sell_at").reset_index(drop=True)
+    out["cumulative"] = out["net_profit"].cumsum()
+    out["peak"] = out["cumulative"].cummax().clip(lower=0)
+    out["drawdown"] = out["cumulative"] - out["peak"]
+    return out[cols]
 
 
 def trade_results_by_signal(df: pd.DataFrame) -> pd.DataFrame:

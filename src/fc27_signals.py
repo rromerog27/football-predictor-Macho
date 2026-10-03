@@ -540,3 +540,24 @@ def plan_levels(row) -> dict[str, float]:
     if kind == "RIESGO":
         return {"Caída posible": price * 0.85, "Invalidación": price * 1.03}
     return {}
+
+
+def price_alert_hits(watchlist: pd.DataFrame) -> list[Alert]:
+    """Avisos de precio de Mi lista que se han cumplido con el último precio guardado
+    (consola). Salen como alertas de la carta, así se muestran arriba de la página."""
+    hits: list[Alert] = []
+    if watchlist.empty:
+        return hits
+    for r in watchlist.itertuples(index=False):
+        price = getattr(r, "last_price", None)
+        if price is None or pd.isna(price):
+            continue
+        label = f"{r.name} {'' if pd.isna(r.overall) else int(r.overall)}".strip()
+        below, above = getattr(r, "alert_below", None), getattr(r, "alert_above", None)
+        if below is not None and not pd.isna(below) and price <= below:
+            hits.append(Alert("crítica", "CONFIRMADO", f"{label} bajó a {int(price):,}".replace(",", "."),
+                              f"Tu aviso: por debajo de {int(below):,} (consola)".replace(",", "."), "precio", int(r.ea_id)))
+        if above is not None and not pd.isna(above) and price >= above:
+            hits.append(Alert("crítica", "CONFIRMADO", f"{label} subió a {int(price):,}".replace(",", "."),
+                              f"Tu aviso: por encima de {int(above):,} (consola)".replace(",", "."), "precio", int(r.ea_id)))
+    return hits
