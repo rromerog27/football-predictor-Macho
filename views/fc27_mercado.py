@@ -52,7 +52,7 @@ st.markdown(
     .fc-risk {{ background:#FEE2E2; color:#B91C1C; }}
     .fc-chip {{ display:inline-block; font-size:.66rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
                padding:2px 7px; border-radius:5px; background:{ui_theme.GRAY_100}; color:{ui_theme.INK_600}; margin-left:6px; }}
-    .fc-up {{ color:#1D4ED8; font-weight:600; }}
+    .fc-up {{ color:#15803D; font-weight:600; }}
     .fc-down {{ color:#B91C1C; font-weight:600; }}
     .fc-hero {{ border-radius:14px; padding:14px 16px; border:1px solid {ui_theme.GRAY_200}; background:{ui_theme.WHITE};
                height:100%; color:{ui_theme.INK_900}; }}
@@ -188,17 +188,99 @@ def _follow_button(conn, row, followed: set[int], key: str) -> None:
         st.rerun()
 
 
-def _price_chart(conn, ea_id: int, height: int = 260) -> None:
+RANGES = {"24h": timedelta(hours=24), "7 días": timedelta(days=7), "Todo": None}
+EVENT_COLORS = {"promo": "#7C3AED", "sbc": "#0891B2", "totw": "#B45309", "season": "#475569", "other": "#64748B"}
+
+
+def _all_events(analyst: dict) -> pd.DataFrame:
+    """Todos los eventos del calendario del analista (pasados y futuros), con fecha UTC."""
+    rows = []
+    for e in analyst.get("events", []):
+        try:
+            when = pd.Timestamp(e["when"]).tz_convert("UTC") if pd.Timestamp(e["when"]).tzinfo else \
+                pd.Timestamp(e["when"]).tz_localize("UTC")
+        except (KeyError, ValueError):
+            continue
+        rows.append({"when": when, "type": e.get("type", "other"), "label": e.get("label", "")})
+    return pd.DataFrame(rows, columns=["when", "type", "label"])
+
+
+def _price_chart(conn, ea_id: int, key: str, height: int = 320, row=None, analyst: dict | None = None) -> None:
+    """Gráfico de precio (consola) de una carta con selector de rango, niveles del
+    plan, eventos del calendario y tus compras y ventas de 📒 Operaciones."""
     hist = fc27_history.price_history(conn, ea_id)
     if len(hist) < 2:
-        st.caption("Aún no hay historial de esta carta: se necesitan al menos dos instantáneas.")
+        st.caption("Aún no hay historial de esta carta: se necesitan al menos dos instantáneas. Activa las "
+                   "instantáneas automáticas para que crezca solo.")
         return
-    fig = go.Figure(go.Scatter(x=hist["fetched_at"], y=hist["price"], mode="lines+markers",
-                               line=dict(color=ui_theme.BLUE, width=2), marker=dict(size=6),
-                               hovertemplate="%{x|%d %b %H:%M} UTC<br>%{y:,} monedas<extra></extra>"))
+    rng = st.segmented_control("Rango", list(RANGES), default="7 días", key=f"rng_{key}",
+                               label_visibility="collapsed") or "7 días"
+    end = hist["fetched_at"].max()
+    start = end - RANGES[rng] if RANGES[rng] is not None else hist["fetched_at"].min()
+    view = hist[hist["fetched_at"] >= start]
+    if len(view) < 2:
+        view = hist.tail(2)
+        start = view["fetched_at"].min()
+
+    fig = go.Figure(go.Scatter(
+        x=view["fetched_at"], y=view["price"], mode="lines+markers", name="Precio (consola)",
+        line=dict(color=ui_theme.BLUE, width=2), marker=dict(size=5),
+        fill="tozeroy", fillcolor="rgba(29,78,216,0.06)",
+        hovertemplate="%{x|%a %d %b %H:%M} UTC<br>%{y:,} monedas<extra></extra>",
+    ))
+    lo, hi = float(view["price"].min()), float(view["price"].max())
+
+    if row is not None:
+        level_colors = {"Objetivo": "#15803D", "Stop": "#DC2626", "Entrada": "#B45309",
+                        "Caída posible": "#DC2626", "Invalidación": "#475569"}
+        for name, value in fc27_signals.plan_levels(row).items():
+            fig.add_hline(y=value, line=dict(color=level_colors.get(name, "#64748B"), width=1, dash="dot"),
+                          annotation_text=f"{name} {_fmt_short(value)}", annotation_position="top left",
+                          annotation_font=dict(size=11, color=level_colors.get(name, "#64748B")))
+            lo, hi = min(lo, value), max(hi, value)
+
+    events_at = None
+    if analyst:
+        ev = _all_events(analyst)
+        ev = ev[(ev["when"] >= start) & (ev["when"] <= end + timedelta(days=2))]
+        if not ev.empty:
+            # Un marcador por momento (varios eventos a la misma hora se juntan) con el texto al pasar el ratón:
+            # así las etiquetas no se pisan entre sí ni con las líneas del plan.
+            events_at = ev.groupby("when").agg(label=("label", " · ".join), type=("type", "first")).reset_index()
+            for e in events_at.itertuples(index=False):
+                fig.add_vline(x=e.when, line=dict(color=EVENT_COLORS.get(e.type, "#64748B"), width=1, dash="dash"))
+
+    trades = fc27_history.trades(conn)
+    if not trades.empty:
+        mine = trades[trades["ea_id"] == ea_id]
+        for tr in mine.itertuples(index=False):
+            for when, price, label, color in ((tr.buy_at, tr.buy_price, "Compra", "#15803D"),
+                                              (tr.sell_at, tr.sell_price, "Venta", "#DC2626")):
+                if when is None or pd.isna(when):
+                    continue
+                ts = pd.Timestamp(when).tz_convert("UTC")
+                if ts < start:
+                    continue
+                fig.add_vline(x=ts, line=dict(color=color, width=2))
+                fig.add_annotation(x=ts, y=0, yref="paper", text=f"{label} PC {_fmt_short(price)}", showarrow=False,
+                                   xanchor="left", yanchor="bottom", bgcolor="rgba(255,255,255,0.85)",
+                                   font=dict(size=10, color=color))
+
+    pad = (hi - lo) * 0.12 or hi * 0.05
+    if events_at is not None:
+        fig.add_trace(go.Scatter(
+            x=events_at["when"], y=[hi + pad * 0.6] * len(events_at), mode="markers", name="Eventos",
+            marker=dict(symbol="triangle-down", size=11,
+                        color=[EVENT_COLORS.get(x, "#64748B") for x in events_at["type"]]),
+            text=events_at["label"], hovertemplate="📅 %{text}<br>%{x|%a %d %b %H:%M} UTC<extra></extra>",
+        ))
     fig.update_layout(template="plotly_white", height=height, margin=dict(t=10, b=30, l=60, r=10),
-                      yaxis_title="Monedas", separators=",.")
-    st.plotly_chart(fig, width="stretch")
+                      yaxis=dict(title="Monedas (consola)", range=[max(0, lo - pad), hi + pad], gridcolor="#EEF2F7"),
+                      xaxis=dict(gridcolor="#EEF2F7"), separators=",.", showlegend=False, hovermode="x unified")
+    st.plotly_chart(fig, width="stretch", key=f"chart_{key}")
+    st.caption("Línea azul: precio de consola en tus instantáneas. Líneas punteadas: niveles del plan. "
+               "▼ y líneas discontinuas: eventos del calendario (pasa el ratón para verlos). Verticales verdes/rojas: tus "
+               "compras y ventas (precio PC).")
 
 
 def _calibration_text(evaluated: pd.DataFrame, kind: str) -> str:
@@ -356,7 +438,7 @@ def render_signals(conn, signals: pd.DataFrame, evaluated: pd.DataFrame, analyst
                             unsafe_allow_html=True)
 
 
-def render_watchlist(conn, signals: pd.DataFrame) -> None:
+def render_watchlist(conn, signals: pd.DataFrame, analyst: dict) -> None:
     wl = fc27_history.watchlist(conn)
     if wl.empty:
         st.info("Tu lista está vacía. Pulsa **☆ Seguir** en una señal, o selecciona una carta en la pestaña "
@@ -433,7 +515,8 @@ def render_watchlist(conn, signals: pd.DataFrame) -> None:
     if c2.button("Quitar de Mi lista", key="wl_remove", width="stretch"):
         fc27_history.remove_from_watchlist(conn, names[choice])
         st.rerun()
-    _price_chart(conn, names[choice])
+    _price_chart(conn, names[choice], key="wl", analyst=analyst,
+                 row=signals[signals["ea_id"] == names[choice]].iloc[0] if (signals["ea_id"] == names[choice]).any() else None)
 
 
 OTHER_CARD = "✏️ Otra carta (escribir nombre)"
@@ -542,11 +625,52 @@ def render_trades(conn, signals: pd.DataFrame) -> None:
             st.rerun()
 
 
-def render_market(conn, signals: pd.DataFrame, followed: set[int]) -> None:
+HEAT_SCALE = [(0.0, "#B91C1C"), (0.35, "#FCA5A5"), (0.5, "#E5E7EB"), (0.65, "#86EFAC"), (1.0, "#15803D")]
+HEAT_RANGE = 15  # ±15% satura el color: así los movimientos pequeños siguen viéndose
+
+
+def render_heatmap(cards: pd.DataFrame) -> None:
+    """Mapa de calor del mercado: bloques por rareza; tamaño según precio (escala
+    logarítmica, para que los Icons millonarios no tapen al resto) y color según
+    la variación de 24h (rojo baja, gris plano, verde sube)."""
+    import numpy as np
+
+    data = cards.dropna(subset=["pct_24h"]).copy()
+    if data.empty:
+        return
+    data["size"] = np.log10(data["price"].clip(lower=1000)) - 2.5
+    data["label"] = data["name"] + " " + data["overall"].astype(str)
+    data["rarity_label"] = data["rarity"].replace({"Team of the week": "TOTW", "Destined for Glory": "DFG",
+                                                    "Base Icon": "Icons", "Base Hero": "Heroes"})
+    data["price_txt"] = data["price"].map(_fmt)
+    import plotly.express as px
+
+    fig = px.treemap(
+        data, path=[px.Constant("Mercado"), "rarity_label", "label"], values="size", color="pct_24h",
+        color_continuous_scale=HEAT_SCALE, range_color=(-HEAT_RANGE, HEAT_RANGE), color_continuous_midpoint=0,
+        custom_data=["price_txt", "pct_24h", "signal"],
+    )
+    fig.update_traces(
+        texttemplate="<b>%{label}</b><br>%{customdata[1]:+.1f}%", textfont=dict(size=12),
+        hovertemplate="<b>%{label}</b><br>%{customdata[0]} monedas (consola)<br>24h: %{customdata[1]:+.1f}%"
+                      "<br>Señal: %{customdata[2]}<extra></extra>",
+        marker=dict(line=dict(width=1, color="#FFFFFF")), root_color="#F8FAFC",
+    )
+    fig.update_layout(height=430, margin=dict(t=10, b=10, l=0, r=0), separators=",.",
+                      coloraxis_colorbar=dict(title="24h %", ticksuffix="%", len=0.7, thickness=12))
+    st.markdown("##### Mapa del mercado (24h)")
+    st.plotly_chart(fig, width="stretch", key="heatmap")
+    st.caption(f"Cada bloque es una carta, agrupada por rareza. Tamaño: precio (escala logarítmica). Color: variación "
+               f"de 24h (el color satura en ±{HEAT_RANGE}%). Haz clic en una rareza para ampliarla; clic en el "
+               "título para volver.")
+
+
+def render_market(conn, signals: pd.DataFrame, followed: set[int], analyst: dict) -> None:
     cards = signals[~signals["key"].str.startswith("fodder")].copy()
     if cards.empty:
         st.info("No hay cartas en tu presupuesto. Cambia el presupuesto en la barra lateral.")
         return
+    render_heatmap(cards)
     f1, f2, f3 = st.columns([2, 1.2, 1.8])
     rarities = sorted(cards["rarity"].dropna().unique())
     sel_rar = f1.multiselect("Rareza", rarities, default=[], placeholder="Todas", key="mv_rar")
@@ -574,7 +698,7 @@ def render_market(conn, signals: pd.DataFrame, followed: set[int]) -> None:
     event = st.dataframe(
         view[["followed", "name", "overall", "rarity", "price", "trend", *pct_cols, "market_score", "risk_score",
               "signal"]],
-        hide_index=True, width="stretch", height=480, on_select="rerun", selection_mode="single-row", key="mv_table",
+        hide_index=True, width="stretch", height=min(480, 38 + 35 * max(len(view), 1)), on_select="rerun", selection_mode="single-row", key="mv_table",
         column_config={
             "followed": st.column_config.TextColumn("", help="⭐ = está en Mi lista", width="small"),
             "name": "Carta", "overall": st.column_config.NumberColumn("OVR", format="%d"), "rarity": "Rareza",
@@ -617,13 +741,55 @@ def render_market(conn, signals: pd.DataFrame, followed: set[int]) -> None:
             _follow_button(conn, row, followed, key=f"follow_market_{row['key']}")
             st.markdown(f"[Abrir en FUT.GG ↗]({row['link']})")
         with right:
-            _price_chart(conn, int(row["ea_id"]), height=300)
+            _price_chart(conn, int(row["ea_id"]), key="market", row=row, analyst=analyst)
 
 
-def render_fodder(snap: fc27_market.MarketSnapshot) -> None:
+FODDER_COLORS = {84: "#2A78D6", 85: "#EB6834", 86: "#1BAF7A"}
+
+
+def render_fodder_index(conn) -> None:
+    """Evolución del precio de referencia del fodder 84/85/86 en tus instantáneas."""
+    idx = fc27_history.fodder_index(conn, ratings=tuple(FODDER_COLORS))
+    st.markdown("##### Índice de fodder (84 · 85 · 86)")
+    if idx.empty or idx["fetched_at"].nunique() < 2:
+        st.caption("Se necesitan al menos dos instantáneas para dibujar el índice.")
+        return
+    rng = st.segmented_control("Rango del índice", list(RANGES), default="Todo", key="rng_fodder",
+                               label_visibility="collapsed") or "Todo"
+    if RANGES[rng] is not None:
+        idx = idx[idx["fetched_at"] >= idx["fetched_at"].max() - RANGES[rng]]
+    fig = go.Figure()
+    summary = []
+    for ovr, color in FODDER_COLORS.items():
+        s = idx[idx["overall"] == ovr]
+        if s.empty:
+            continue
+        first, last = int(s["price"].iloc[0]), int(s["price"].iloc[-1])
+        change = (last / first - 1) * 100 if first else 0
+        summary.append(f"**{ovr}**: {_fmt(first)} → {_fmt(last)} ({change:+.1f}%)")
+        fig.add_trace(go.Scatter(
+            x=s["fetched_at"], y=s["price"] / first * 100, mode="lines+markers", name=f"Rating {ovr}",
+            line=dict(color=color, width=2), marker=dict(size=5), customdata=s["price"],
+            hovertemplate=f"Rating {ovr}<br>%{{x|%a %d %b %H:%M}} UTC<br>%{{customdata:,}} monedas"
+                          "<br>Índice %{y:.0f}<extra></extra>",
+        ))
+        fig.add_annotation(x=s["fetched_at"].iloc[-1], y=last / first * 100, text=f"{ovr}", showarrow=False,
+                           xanchor="left", xshift=6, font=dict(color=color, size=12))
+    fig.add_hline(y=100, line=dict(color="#94A3B8", width=1, dash="dot"))
+    fig.update_layout(template="plotly_white", height=300, margin=dict(t=10, b=30, l=50, r=30), separators=",.",
+                      yaxis=dict(title="Índice (inicio = 100)", gridcolor="#EEF2F7"), xaxis=dict(gridcolor="#EEF2F7"),
+                      legend=dict(orientation="h", y=1.08, x=0), hovermode="x unified")
+    st.plotly_chart(fig, width="stretch", key="fodder_index")
+    st.markdown(" · ".join(summary))
+    st.caption("Precio de referencia (mediana de las 5 más baratas) de cada rating, normalizado a 100 al inicio del "
+               "rango para comparar ratings con precios distintos. Si sube, crece la demanda de fodder para SBC.")
+
+
+def render_fodder(snap: fc27_market.MarketSnapshot, conn) -> None:
     fodder = fc27_market.fodder_table(snap.cheapest)
     st.caption("Los SBC piden puntos de Item Score. Cuanto menos cueste cada punto, mejor fodder. "
                "El precio de referencia es la mediana de las 5 cartas más baratas de cada rating.")
+    render_fodder_index(conn)
     left, right = st.columns([3, 2])
     with left:
         st.markdown("##### Monedas por punto de Item Score")
@@ -851,13 +1017,13 @@ def main() -> None:
         with tabs[0]:
             render_signals(conn, signals, evaluated, analyst, now, followed)
         with tabs[1]:
-            render_watchlist(conn, all_signals)
+            render_watchlist(conn, all_signals, analyst)
         with tabs[2]:
             render_trades(conn, all_signals)
         with tabs[3]:
-            render_market(conn, signals, followed)
+            render_market(conn, signals, followed, analyst)
         with tabs[4]:
-            render_fodder(snap)
+            render_fodder(snap, conn)
         with tabs[5]:
             render_alerts(alerts, analyst, now)
         with tabs[6]:

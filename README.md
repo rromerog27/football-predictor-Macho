@@ -216,6 +216,15 @@ app:
 
 Cada ejecución deja una línea en `data/fc27_snapshot.log` (no se versiona).
 
+**Visualizaciones.**
+- *Mapa del mercado* (pestaña Mercado): bloques agrupados por rareza; tamaño
+  según precio (escala logarítmica) y color según la variación de 24h.
+- *Gráfico de cada carta* (ficha en Mercado y Mi lista): rango 24h / 7 días /
+  todo, niveles del plan (objetivo, stop…), eventos del calendario y tus
+  compras y ventas de Operaciones.
+- *Índice de fodder* (pestaña Fodder y SBC): precio de referencia de los
+  ratings 84, 85 y 86 en tus instantáneas, normalizado a 100.
+
 **📒 Operaciones.** Diario de compras y ventas reales, con precios de PC por
 unidad. Muestra el beneficio neto (con el 5% de EA), el ROI, el % de
 operaciones ganadoras, el capital invertido en operaciones abiertas y qué

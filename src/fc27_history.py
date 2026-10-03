@@ -206,6 +206,33 @@ def price_series(conn: sqlite3.Connection, ea_ids, since: datetime) -> dict[int,
     return out
 
 
+def fodder_index(conn: sqlite3.Connection, ratings=(84, 85, 86), sample: int = 5,
+                 since: datetime | None = None) -> pd.DataFrame:
+    """Índice de fodder: en cada instantánea, mediana de las `sample` cartas más
+    baratas de cada rating (la misma referencia que usa la tabla de fodder).
+
+    Columnas: fetched_at, overall, price. Sirve para ver si sube o baja la
+    demanda de fodder para SBC a lo largo del tiempo.
+    """
+    marks = ",".join("?" * len(ratings))
+    params: list = [*ratings]
+    where = ""
+    if since is not None:
+        where = " AND s.fetched_at >= ?"
+        params.append(_iso(since))
+    df = pd.read_sql_query(
+        f"SELECT s.fetched_at, p.overall, p.price FROM prices p JOIN snapshots s ON s.id = p.snapshot_id "
+        f"WHERE p.source = 'cheapest' AND p.overall IN ({marks}){where}",
+        conn, params=params,
+    )
+    if df.empty:
+        return pd.DataFrame(columns=["fetched_at", "overall", "price"])
+    out = (df.sort_values("price").groupby(["fetched_at", "overall"])["price"]
+             .apply(lambda s: int(s.head(sample).median())).reset_index())
+    out["fetched_at"] = pd.to_datetime(out["fetched_at"], utc=True)
+    return out.sort_values(["overall", "fetched_at"]).reset_index(drop=True)
+
+
 def _all_prices_since(conn: sqlite3.Connection, since: datetime) -> pd.DataFrame:
     df = pd.read_sql_query(
         "SELECT s.fetched_at, p.ea_id, MIN(p.price) AS price FROM prices p JOIN snapshots s ON s.id = p.snapshot_id "
