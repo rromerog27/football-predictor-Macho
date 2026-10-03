@@ -522,3 +522,21 @@ def trade_plan(row) -> dict[str, str]:
         return {"zona": "No comprar. Si la tienes, valorar vender.", "objetivo": f"Posible caída hacia {fmt(price * 0.85)}",
                 "invalidacion": f"Se mantiene por encima de {fmt(price * 1.03)} durante 48h."}
     return {"zona": "—", "objetivo": "—", "invalidacion": "—"}
+
+
+def plan_levels(row) -> dict[str, float]:
+    """Niveles numéricos del plan para dibujarlos en el gráfico (precios de consola).
+
+    Mismas reglas que `trade_plan`: COMPRAR → objetivo +15% y stop −10%;
+    VIGILAR → entrada −7% y objetivo +8%; RIESGO → caída posible −15% e
+    invalidación +3%. Sin señal → vacío.
+    """
+    price = float(row["price"])
+    kind = row["signal"]
+    if kind == "COMPRAR":
+        return {"Objetivo": price * 1.15, "Stop": price * 0.90}
+    if kind == "VIGILAR":
+        return {"Entrada": price * 0.93, "Objetivo": price * 1.08}
+    if kind == "RIESGO":
+        return {"Caída posible": price * 0.85, "Invalidación": price * 1.03}
+    return {}

@@ -352,3 +352,19 @@ def test_sparkline_svg_direction_color():
     assert up.startswith("<svg") and ui_theme.GREEN in up
     assert "#DC2626" in down
     assert ui_theme.sparkline_svg([5]) == ""
+
+
+def test_fodder_index_uses_median_of_cheapest(snap):
+    conn = fc27_history.connect(":memory:")
+    fc27_history.save_snapshot(conn, snap)
+    idx = fc27_history.fodder_index(conn, ratings=(84, 85))
+    by_rating = dict(zip(idx["overall"], idx["price"]))
+    assert by_rating[84] == 675   # mediana de 650 y 700
+    assert by_rating[85] == 1800
+    assert fc27_history.fodder_index(conn, ratings=(99,)).empty
+
+
+def test_plan_levels_match_signal():
+    assert fc27_signals.plan_levels({"price": 1000, "signal": "COMPRAR"}) == pytest.approx({"Objetivo": 1150, "Stop": 900})
+    assert set(fc27_signals.plan_levels({"price": 1000, "signal": "RIESGO"})) == {"Caída posible", "Invalidación"}
+    assert fc27_signals.plan_levels({"price": 1000, "signal": None}) == {}
