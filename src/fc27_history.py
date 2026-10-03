@@ -172,7 +172,8 @@ def load_latest_snapshot(conn: sqlite3.Connection) -> MarketSnapshot | None:
         return None
     sid, fetched_at = row
     prices = pd.read_sql_query("SELECT * FROM prices WHERE snapshot_id = ?", conn, params=(sid,))
-    movers = prices[prices["source"] == "momentum"][MOVER_COLUMNS].reset_index(drop=True)
+    movers = prices[prices["source"] == "momentum"][MOVER_COLUMNS]
+    movers = movers[movers["price"] > 0].reset_index(drop=True)  # sin precio de mercado (precio 0)
     cheapest = prices[prices["source"] == "cheapest"][CHEAPEST_COLUMNS].reset_index(drop=True)
     sbcs = pd.read_sql_query("SELECT * FROM sbcs WHERE snapshot_id = ?", conn, params=(sid,))[SBC_COLUMNS]
     sbcs["repeatable"] = sbcs["repeatable"].astype(bool)
