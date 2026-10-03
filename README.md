@@ -225,6 +225,16 @@ Cada ejecución deja una línea en `data/fc27_snapshot.log` (no se versiona).
 - *Índice de fodder* (pestaña Fodder y SBC): precio de referencia de los
   ratings 84, 85 y 86 en tus instantáneas, normalizado a 100.
 
+**Más ayudas.**
+- *🔍 Ver ficha*: en cada señal abre una ventana con el gráfico completo, el
+  plan, los motivos, los riesgos y el desglose del Market Score.
+- *🔔 Avisos de precio* (Mi lista): "avísame si baja de X / sube de Y" sobre el
+  precio de consola; se muestran arriba de la página cuando se cumplen.
+- *🆕 Desde tu última visita*: SBC nuevos, señales nuevas de compra o riesgo y
+  avisos de precio que saltaron mientras no estabas.
+- *💰 Curva de beneficio* (Operaciones): beneficio neto acumulado y caída desde
+  el máximo.
+
 **📒 Operaciones.** Diario de compras y ventas reales, con precios de PC por
 unidad. Muestra el beneficio neto (con el 5% de EA), el ROI, el % de
 operaciones ganadoras, el capital invertido en operaciones abiertas y qué
