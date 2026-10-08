@@ -13,11 +13,13 @@ usa internet: descarga datos en vivo de FUT.GG para buscar oportunidades de
 trading en EA SPORTS FC 27 Ultimate Team (ver "Sección FC 27 Mercado" más
 abajo). No comparte datos con el predictor de partidos.
 
-Por separado, el script de terminal **`modelo_prediccion.py`** sí descarga
-datos reales de internet (xG partido a partido de Understat) para predecir
-un partido concreto con un ensemble Poisson + regresión logística (ver
-"Predicción por terminal con datos web" más abajo). Tampoco comparte datos
-con la app.
+La página **Partidos del día** también usa internet: descarga de Understat el
+xG partido a partido y muestra, para los partidos de la fecha elegida, la
+predicción de un ensemble Poisson + regresión logística; también permite
+correr el modelo para cualquier cruce de una liga. El mismo modelo se puede
+usar desde la terminal con **`modelo_prediccion.py`** (ver "Partidos del día
+y predicción por terminal" más abajo). No comparte datos con el predictor de
+archivos.
 
 ## Estado actual: Fase 3 — Exportación (completa)
 
@@ -118,6 +120,7 @@ football_predictor/
 ├── app.py                    # Punto de entrada: configuración y navegación entre páginas
 ├── views/
 │   ├── fc27_mercado.py       # Página Mercado FC 27
+│   ├── partidos_del_dia.py   # Página Partidos del día (predicciones con xG de Understat)
 │   └── predictor.py          # Página Predictor de partidos
 ├── modelo_prediccion.py      # Predicción por terminal con xG de Understat (Poisson + logística)
 ├── requirements.txt          # Dependencias del proyecto
@@ -138,6 +141,7 @@ football_predictor/
 │   ├── prediction_model.py     # Regresión logística de respaldo + predicción combinada
 │   ├── report_generator.py     # Exportación a CSV, Excel y HTML
 │   ├── market_odds.py          # Comparación contra cuotas de mercado + simulación de value bets
+│   ├── understat_model.py      # Descarga de Understat + modelo Poisson/logística (Partidos del día y terminal)
 │   ├── visualizations.py       # Construcción de gráficos Plotly
 │   └── utils.py                 # Utilidades comunes (safe_divide, logging, formateo)
 │
@@ -166,6 +170,8 @@ football_predictor/
 | `src/prediction_model.py` | Entrena y calibra la regresión logística de respaldo, calcula sus métricas de validación, y combina sus probabilidades con las de Poisson ponderando por desempeño de validación (log loss). |
 | `src/report_generator.py` | Exporta a CSV/Excel/HTML lo que ya calcularon los demás módulos: tabla de estadísticas, predicción de un partido, comparación de equipos, matriz de marcadores y el reporte HTML completo. |
 | `src/market_odds.py` | Convierte cuotas 1X2 a probabilidad implícita (quitando el margen de la casa), evalúa qué tan bien predice el mercado los partidos de prueba, y simula en retrospectiva una estrategia de apuestas de valor comparando el modelo contra el mercado. |
+| `views/partidos_del_dia.py` | Página Partidos del día: lista los partidos de la fecha (en la zona horaria del navegador) con la predicción de cada uno, y la sección "Analizar un partido". Solo presenta: el modelo vive en `src/understat_model.py`. |
+| `src/understat_model.py` | Descarga el xG de Understat (con caché en disco), calcula la fuerza ajustada por rival, entrena Poisson + regresión logística por liga y predice partidos. Lo usan la página Partidos del día y `modelo_prediccion.py`. |
 | `src/visualizations.py` | Construye los gráficos Plotly (barras, radar, evolución de forma, mapas de calor, importancia de variables) a partir de datos ya calculados. |
 | `src/utils.py` | Funciones auxiliares compartidas: división segura, formateo de porcentajes/métricas, logging, semilla aleatoria y umbrales de suficiencia de datos. |
 
@@ -291,7 +297,26 @@ Las señales son heurísticas: el Market Score es un indicador comparativo, no
 una probabilidad de ganar. FUTBIN no se usa porque bloquea las peticiones
 automáticas.
 
-## Predicción por terminal con datos web (`modelo_prediccion.py`)
+## Partidos del día y predicción por terminal
+
+La página **Partidos del día** (`streamlit run app.py` → "Fútbol real") tiene
+dos secciones:
+
+- **Partidos del día:** elige la fecha y las ligas; cada partido muestra la
+  barra 1X2, Over 2.5, ambos anotan, el marcador más probable y, en "Ver
+  análisis", Poisson vs. logística, la racha y el xG de cada equipo. En
+  partidos ya jugados muestra el resultado y si el pronóstico acertó. Si no
+  hay partidos ese día, ofrece saltar a la próxima fecha con partidos.
+- **Analizar un partido:** elige liga, local y visitante y pulsa "Correr
+  modelo". Si el partido está en el calendario de los próximos 14 días se
+  usa su fecha; si no, los datos disponibles hasta hoy.
+
+Cada liga se entrena una vez y queda en caché 3 horas (la primera visita
+tarda unos segundos por liga); predecir cada partido es instantáneo. Las
+horas y el "día" usan la zona horaria del navegador (se puede cambiar en la
+barra lateral).
+
+Desde la terminal:
 
 ```bash
 python3 modelo_prediccion.py "Arsenal" "Leeds" --liga "Premier League"

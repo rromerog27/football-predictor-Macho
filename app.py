@@ -21,7 +21,7 @@ import streamlit as st
 # releen en cada ejecución, pero los módulos de src/ ya importados seguirían en su versión
 # vieja (y la página fallaría con AttributeError o ImportError). Se recargan, en orden de
 # dependencias, los que cambiaron en disco desde que se cargaron.
-for _name in ("src.fc27_market", "src.fc27_history", "src.fc27_signals", "src.ui_theme"):
+for _name in ("src.fc27_market", "src.fc27_history", "src.fc27_signals", "src.understat_model", "src.ui_theme"):
     _module = sys.modules.get(_name)
     if _module is not None and os.path.getmtime(_module.__file__) > getattr(_module, "_loaded_at", 0):
         importlib.reload(_module)
@@ -42,6 +42,7 @@ pages = {
         st.Page("views/fc27_mercado.py", title="Mercado FC 27", icon="📈", url_path="fc27", default=True),
     ],
     "Fútbol real": [
+        st.Page("views/partidos_del_dia.py", title="Partidos del día", icon="📅", url_path="partidos"),
         st.Page("views/predictor.py", title="Predictor de partidos", icon="⚽", url_path="predictor"),
     ],
 }
