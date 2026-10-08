@@ -23,7 +23,9 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from src import backtest
 from src import competitions as comps
+from src import football_data_source as fd
 from src import match_model as mm
 
 MODEL_TTL_S = 3 * 3600  # igual que la caché del año/temporada en curso: el modelo ve los resultados nuevos
@@ -128,6 +130,9 @@ PAGE_CSS = """
 .pd-pill.val { background: var(--fc-yellow-soft); color: var(--fc-yellow-ink);
   border-color: color-mix(in srgb, var(--fc-yellow) 30%, transparent); margin-left: auto; }
 .pd-warn { font-size: .74rem; color: var(--fc-yellow-ink); margin: -4px 0 10px; }
+.pd-info { font-size: .74rem; color: var(--fc-muted); margin: -4px 0 10px; }
+.st-key-pd_perf_form { background: var(--fc-surface); border: 1px solid var(--fc-border);
+  border-radius: var(--fc-radius); box-shadow: var(--fc-shadow); padding: 14px 16px 6px; }
 </style>
 """
 st.markdown(PAGE_CSS, unsafe_allow_html=True)
@@ -171,6 +176,11 @@ def _next_kickoff(codes: tuple[str, ...], after: pd.Timestamp) -> pd.Timestamp |
 def _competition_model(code: str) -> mm.LeagueModel:
     """Descarga los datos de la competición y entrena Poisson + logística (lo caro: una vez cada pocas horas)."""
     return mm.train_league(comps.load_competition(comps.BY_CODE[code]))
+
+
+@st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
+def _backtest(code: str) -> backtest.BacktestResult:
+    return backtest.run(_competition_model(code))
 
 
 def _model_or_error(code: str) -> mm.LeagueModel | None:
@@ -282,6 +292,10 @@ def _card_summary_html(pred: mm.MatchPrediction, tz: str, show_date: bool = Fals
         few = min(pred.home_snap["n_window"], pred.away_snap["n_window"])
         warn = (f"<div class='pd-warn' title='Partidos de los últimos 12 meses en los datos descargados'>"
                 f"⚠ Pocos datos de algún equipo ({few} partidos): tómalo con cautela.</div>")
+    if pred.newcomers:
+        warn += (f"<div class='pd-info' title='Menos de {mm.NEWCOMER_MATCHES} partidos en la competición en 12 meses: "
+                 f"su fuerza sale sobre todo de su liga anterior, con la calibración de ascendidos'>"
+                 f"↑ Recién llegado: {_esc(', '.join(pred.newcomers))}</div>")
     return (
         f"<div class='pd-top'><span class='pd-time'>{_esc(when)}</span>{_pick_pill(pred)}</div>"
         "<div class='pd-teams'>"
@@ -494,9 +508,11 @@ def section_today(tz: str) -> None:
             "Uruguay y Paraguay, sin tiros publicados, solo goles.\n"
             "- **Copas internacionales:** se modelan junto con las ligas de sus participantes, para que la fuerza "
             "de equipos de países distintos sea comparable.\n"
-            "- **Poisson (Dixon-Coles):** fuerza de ataque/defensa ajustada por rival (12 meses, mezclada con los "
-            "últimos 10 partidos y entre señal y goles con pesos elegidos con datos) → goles esperados λ → matriz "
-            "de marcadores, con la corrección de Dixon-Coles para los marcadores bajos.\n"
+            "- **Poisson (Dixon-Coles):** fuerza de ataque/defensa ajustada por rival (12 meses ponderados por "
+            "antigüedad, mezcla de señal y goles con pesos elegidos con datos) → goles esperados λ, con el total "
+            "acercado a la media de la competición → matriz de marcadores con la corrección de Dixon-Coles.\n"
+            "- **Recién ascendidos:** su historial de la división inferior (ESPN) entra en el cálculo de fuerzas, "
+            "con una calibración de su nivel estimada con ascensos anteriores.\n"
             "- **Regresión logística:** reajusta la señal de Poisson con la racha de puntos, la localía y el "
             "descanso. **Ensemble:** el peso de cada modelo minimiza el log loss en el 30% más reciente.\n"
             "- **Mercado:** probabilidades de las cuotas de DraftKings (vía ESPN) sin el margen de la casa. La "
@@ -566,6 +582,84 @@ def section_manual(tz: str) -> None:
             st.dataframe(_recent_table(snap, signal), hide_index=True, width="stretch")
 
 
+def _backtest_row(code: str, r: backtest.BacktestResult) -> dict:
+    return {
+        "Competición": comps.BY_CODE[code].name,
+        "Partidos": r.n_matched,
+        "Modelo": round(r.ll_model, 4),
+        "Mercado": round(r.ll_market, 4),
+        "Distancia": round(r.gap, 4),
+        "Peso del modelo en la mezcla": f"{r.alpha:.0%}",
+        "Over/Under modelo": round(r.ll_ou_model, 4) if r.ll_ou_model is not None else None,
+        "Over/Under mercado": round(r.ll_ou_market, 4) if r.ll_ou_market is not None else None,
+    }
+
+
+def section_performance() -> None:
+    st.markdown(
+        "<div class='pd-note'>Cada modelo se valida con el 30% más reciente de su histórico (partidos que la "
+        "regresión logística no vio al entrenar) y, donde football-data.co.uk publica cuotas, se compara con "
+        "las <b>cuotas de cierre</b> de esos mismos partidos: la referencia más exigente, porque recogen toda la "
+        "información del mercado justo antes del inicio. Log loss: menor es mejor.</div>", unsafe_allow_html=True)
+    with st.container(key="pd_perf_form"):
+        code = st.selectbox("Liga o copa", ORDERED_CODES, key="pd_perf_code",
+                            format_func=lambda c: f"{comps.BY_CODE[c].name} · "
+                                                  f"{'con cuotas' if fd.has_odds(c) else 'solo validación'}")
+    model = _model_or_error(code)
+    if model is None:
+        return
+    t = model.trained
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Log loss del modelo", f"{t.ll_ensemble:.4f}", help=f"{t.n_val} partidos de validación ({t.val_period})")
+    c2.metric("Referencia (frecuencias 1/X/2)", f"{t.ll_baseline:.4f}")
+    c3.metric("Mejora sobre la referencia", f"{t.ll_baseline - t.ll_ensemble:+.4f}")
+    st.caption(f"Parámetros elegidos con datos: señal {model.data.signal_name} {t.signal_weight:.0%} / goles "
+               f"{1 - t.signal_weight:.0%} · Dixon-Coles ρ {t.rho:+.3f} · total de goles {t.total_shrink:.0%} propio "
+               f"/ {1 - t.total_shrink:.0%} media · recién llegados ×{t.newcomer[0]:.2f} goles, ×{t.newcomer[1]:.2f} "
+               f"rival · ensemble {t.w_poisson:.0%} Poisson / {1 - t.w_poisson:.0%} logística.")
+
+    if not fd.has_odds(code):
+        st.info("football-data.co.uk no publica cuotas de esta competición: solo hay validación, no backtest "
+                "contra el mercado.")
+    else:
+        with st.spinner("Comparando con las cuotas de cierre…"):
+            try:
+                r = _backtest(code)
+            except mm.PredictionError as exc:
+                st.warning(str(exc))
+                r = None
+        if r is not None:
+            st.markdown(f"**Contra el mercado** · {r.n_matched} partidos ({r.period}) · cuotas: {r.odds_source}")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Modelo", f"{r.ll_model:.4f}")
+            m2.metric("Mercado (cierre)", f"{r.ll_market:.4f}")
+            m3.metric("Distancia", f"{r.gap:+.4f}", help="Log loss modelo − mercado: negativo = mejor que el cierre")
+            m4.metric("Peso en la mezcla", f"{r.alpha:.0%}",
+                      help="Mezcla modelo + mercado con menor log loss. ~0% = el modelo no añade información "
+                           f"al cierre (log loss de la mezcla, con validación cruzada: {r.ll_blend_cv:.4f}).")
+            if r.ll_ou_model is not None:
+                st.caption(f"Over/Under 2.5 ({r.n_ou} partidos): modelo {r.ll_ou_model:.4f} · mercado "
+                           f"{r.ll_ou_market:.4f}.")
+            st.markdown("ROI simulado apostando 1 unidad a la cuota de cierre cuando el modelo da al menos "
+                        "el umbral de puntos más que el mercado (orientativo: muestras pequeñas, mucho ruido):")
+            roi = r.roi.assign(ROI=r.roi["ROI"].map(lambda x: f"{x * 100:+.1f}%" if pd.notna(x) else "—"))
+            st.dataframe(roi, hide_index=True, width="stretch")
+
+    if st.button("Resumen de todas las competiciones con cuotas", icon=":material/table_chart:"):
+        rows = []
+        codes = [c for c in ORDERED_CODES if fd.has_odds(c)]
+        bar = st.progress(0.0)
+        for n, c in enumerate(codes, start=1):
+            bar.progress(n / len(codes), text=f"{comps.BY_CODE[c].name} ({n}/{len(codes)})…")
+            try:
+                rows.append(_backtest_row(c, _backtest(c)))
+            except Exception as exc:  # noqa: BLE001 — una competición sin datos no corta el resumen
+                st.warning(f"{comps.BY_CODE[c].name}: {exc}")
+        bar.empty()
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+
 # ---------------------------------------------------------------------------
 # Página
 # ---------------------------------------------------------------------------
@@ -583,10 +677,12 @@ st.markdown(
 with st.sidebar:
     tz = st.selectbox("Zona horaria", tz_options, index=tz_options.index(default_tz), key="pd_tz",
                       help="Por defecto, la de tu navegador. Define qué partidos son \"del día\" y sus horas.")
-view = st.segmented_control("Sección", ["Partidos del día", "Analizar un partido"], default="Partidos del día",
-                            key="pd_view", label_visibility="collapsed")
+view = st.segmented_control("Sección", ["Partidos del día", "Analizar un partido", "Rendimiento del modelo"],
+                            default="Partidos del día", key="pd_view", label_visibility="collapsed")
 
 if view == "Analizar un partido":
     section_manual(tz)
+elif view == "Rendimiento del modelo":
+    section_performance()
 else:
     section_today(tz)

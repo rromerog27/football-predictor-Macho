@@ -27,6 +27,7 @@ from src.match_model import (
     PredictionError,
     build_league_data,
     normalize,
+    team_similarity,
     utc_now,
 )
 
@@ -34,6 +35,7 @@ UNDERSTAT_SEASONS = 5  # temporadas anteriores a la actual (la más antigua es s
 ESPN_LEAGUE_YEARS = 4  # años naturales de una liga de ESPN (incluido el actual)
 ESPN_CUP_YEARS = 2  # años naturales del pool de una copa (muchas ligas: se limita la descarga)
 MAX_WORKERS = 8
+MIN_MAPPING_SIMILARITY = 0.85  # nombres ESPN ↔ Understat del mismo club (p. ej. "Leeds United" ↔ "Leeds")
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,7 @@ class Competition:
     understat: str | None = None  # código de Understat si hay xG real
     pool: tuple[str, ...] = ()  # copas: ligas (slugs de ESPN) que alimentan la fuerza de sus equipos
     aliases: tuple[str, ...] = ()
+    lower: tuple[str, ...] = ()  # división inferior (ESPN): historial de los recién ascendidos
 
     @property
     def is_cup(self) -> bool:
@@ -54,47 +57,53 @@ UEFA_POOL = ("eng.1", "esp.1", "ger.1", "ita.1", "fra.1", "por.1", "ned.1", "bel
              "sui.1", "gre.1", "den.1", "nor.1", "swe.1", "cze.1", "cyp.1", "isr.1", "rou.1")
 CONMEBOL_POOL = ("arg.1", "bra.1", "col.1", "chi.1", "per.1", "ecu.1", "uru.1", "par.1", "bol.1", "ven.1")
 CONCACAF_POOL = ("mex.1", "usa.1", "crc.1", "hon.1", "gua.1")
+# Las copas de una misma confederación se modelan juntas: más cruces entre países calibran mejor las ligas.
+UEFA_CUPS = ("uefa.champions", "uefa.europa", "uefa.europa.conf")
+CONMEBOL_CUPS = ("conmebol.libertadores", "conmebol.sudamericana")
 
 COMPETITIONS = [
     # Europa — con xG real (Understat)
-    Competition("eng.1", "Premier League", "Europa", "EPL", aliases=("premier", "epl", "inglaterra")),
-    Competition("esp.1", "LaLiga", "Europa", "La_liga", aliases=("la liga", "liga espanola", "espana")),
-    Competition("ger.1", "Bundesliga", "Europa", "Bundesliga", aliases=("alemania",)),
-    Competition("ita.1", "Serie A", "Europa", "Serie_A", aliases=("italia",)),
-    Competition("fra.1", "Ligue 1", "Europa", "Ligue_1", aliases=("francia",)),
+    Competition("eng.1", "Premier League", "Europa", "EPL", aliases=("premier", "epl", "inglaterra"), lower=("eng.2",)),
+    Competition("esp.1", "LaLiga", "Europa", "La_liga", aliases=("la liga", "liga espanola", "espana"), lower=("esp.2",)),
+    Competition("ger.1", "Bundesliga", "Europa", "Bundesliga", aliases=("alemania",), lower=("ger.2",)),
+    Competition("ita.1", "Serie A", "Europa", "Serie_A", aliases=("italia",), lower=("ita.2",)),
+    Competition("fra.1", "Ligue 1", "Europa", "Ligue_1", aliases=("francia",), lower=("fra.2",)),
     Competition("rus.1", "Liga rusa", "Europa", "RFPL", aliases=("rfpl", "rusia")),
     # Europa — xG aproximado (ESPN)
-    Competition("eng.2", "Championship", "Europa", aliases=("inglaterra 2",)),
+    Competition("eng.2", "Championship", "Europa", aliases=("inglaterra 2",), lower=("eng.3",)),
     Competition("esp.2", "LaLiga 2", "Europa", aliases=("segunda division", "laliga hypermotion")),
     Competition("ger.2", "2. Bundesliga", "Europa"),
-    Competition("ita.2", "Serie B", "Europa"),
+    Competition("ita.2", "Serie B", "Europa", lower=("ita.3",)),
     Competition("fra.2", "Ligue 2", "Europa"),
     Competition("por.1", "Primeira Liga", "Europa", aliases=("portugal", "liga portugal")),
-    Competition("ned.1", "Eredivisie", "Europa", aliases=("holanda", "paises bajos")),
+    Competition("ned.1", "Eredivisie", "Europa", aliases=("holanda", "paises bajos"), lower=("ned.2",)),
     Competition("bel.1", "Pro League", "Europa", aliases=("belgica",)),
-    Competition("tur.1", "Süper Lig", "Europa", aliases=("turquia", "super lig")),
-    Competition("sco.1", "Premiership escocesa", "Europa", aliases=("escocia",)),
+    Competition("tur.1", "Süper Lig", "Europa", aliases=("turquia", "super lig"), lower=("tur.2",)),
+    Competition("sco.1", "Premiership escocesa", "Europa", aliases=("escocia",), lower=("sco.2",)),
     # Copas de Europa
-    Competition("uefa.champions", "Champions League", "Copas internacionales", pool=UEFA_POOL,
+    Competition("uefa.champions", "Champions League", "Copas internacionales", pool=UEFA_POOL + UEFA_CUPS[1:],
                 aliases=("champions", "ucl", "liga de campeones")),
-    Competition("uefa.europa", "Europa League", "Copas internacionales", pool=UEFA_POOL, aliases=("uel",)),
-    Competition("uefa.europa.conf", "Conference League", "Copas internacionales", pool=UEFA_POOL,
+    Competition("uefa.europa", "Europa League", "Copas internacionales",
+                pool=UEFA_POOL + (UEFA_CUPS[0], UEFA_CUPS[2]), aliases=("uel",)),
+    Competition("uefa.europa.conf", "Conference League", "Copas internacionales", pool=UEFA_POOL + UEFA_CUPS[:2],
                 aliases=("conference", "uecl")),
     # América
     Competition("mex.1", "Liga MX", "América", aliases=("mexico",)),
     Competition("usa.1", "MLS", "América", aliases=("estados unidos",)),
-    Competition("arg.1", "Liga Profesional Argentina", "América", aliases=("argentina",)),
-    Competition("bra.1", "Brasileirão", "América", aliases=("brasil", "brasileirao")),
-    Competition("col.1", "Liga BetPlay (Colombia)", "América", aliases=("colombia",)),
-    Competition("chi.1", "Primera División de Chile", "América", aliases=("chile",)),
+    Competition("arg.1", "Liga Profesional Argentina", "América", aliases=("argentina",), lower=("arg.2",)),
+    Competition("bra.1", "Brasileirão", "América", aliases=("brasil", "brasileirao"), lower=("bra.2",)),
+    Competition("col.1", "Liga BetPlay (Colombia)", "América", aliases=("colombia",), lower=("col.2",)),
+    Competition("chi.1", "Primera División de Chile", "América", aliases=("chile",), lower=("chi.2",)),
     Competition("per.1", "Liga 1 (Perú)", "América", aliases=("peru",)),
     Competition("ecu.1", "LigaPro (Ecuador)", "América", aliases=("ecuador",)),
     Competition("uru.1", "Liga AUF (Uruguay)", "América", aliases=("uruguay",)),
     Competition("par.1", "Primera División de Paraguay", "América", aliases=("paraguay",)),
     # Copas de América
-    Competition("conmebol.libertadores", "Copa Libertadores", "Copas internacionales", pool=CONMEBOL_POOL,
+    Competition("conmebol.libertadores", "Copa Libertadores", "Copas internacionales",
+                pool=CONMEBOL_POOL + CONMEBOL_CUPS[1:],
                 aliases=("libertadores",)),
-    Competition("conmebol.sudamericana", "Copa Sudamericana", "Copas internacionales", pool=CONMEBOL_POOL,
+    Competition("conmebol.sudamericana", "Copa Sudamericana", "Copas internacionales",
+                pool=CONMEBOL_POOL + CONMEBOL_CUPS[:1],
                 aliases=("sudamericana",)),
     Competition("concacaf.champions", "Concacaf Champions Cup", "Copas internacionales", pool=CONCACAF_POOL,
                 aliases=("concachampions",)),
@@ -148,25 +157,68 @@ def _fetch_espn_years(slugs: list[str], years: list[int], refresh: bool,
     return frame.drop_duplicates("id"), [info for _, info in results]
 
 
+def _season_index(dates: pd.Series) -> pd.Series:
+    """Temporada europea (julio-junio) de cada fecha: 2026-03 → 2025."""
+    return dates.dt.year - (dates.dt.month < 7)
+
+
+def map_team_names(lower: pd.DataFrame, upper: pd.DataFrame,
+                   min_similarity: float = MIN_MAPPING_SIMILARITY) -> dict[str, str]:
+    """Empareja equipos de la división inferior (ESPN) con los de la superior (Understat):
+    nombre muy parecido y temporadas sin solaparse (un club no juega en las dos a la vez).
+    Devuelve {nombre ESPN: nombre Understat}."""
+    def team_seasons(df: pd.DataFrame) -> dict[str, set[int]]:
+        long = pd.concat([df[["home", "datetime"]].rename(columns={"home": "team"}),
+                          df[["away", "datetime"]].rename(columns={"away": "team"})])
+        long = long.assign(season=_season_index(long["datetime"]))
+        return long.groupby("team")["season"].agg(set).to_dict()
+
+    upper_seasons, lower_seasons = team_seasons(upper), team_seasons(lower)
+    candidates = []
+    for e_name, e_seasons in lower_seasons.items():
+        scored = [(team_similarity(e_name, u), u) for u in upper_seasons]
+        sim, best = max(scored) if scored else (0.0, None)
+        if best is not None and sim >= min_similarity and not (e_seasons & upper_seasons[best]):
+            candidates.append((sim, e_name, best))
+    mapping, used = {}, set()
+    for sim, e_name, u_name in sorted(candidates, reverse=True):  # uno a uno, primero los más parecidos
+        if u_name not in used:
+            mapping[e_name] = u_name
+            used.add(u_name)
+    return mapping
+
+
 def load_competition(comp: Competition, refresh: bool = False,
-                     progress: Callable[[str], None] | None = None) -> LeagueData:
+                     progress: Callable[[str], None] | None = None, include_lower: bool = True) -> LeagueData:
     """Descarga los datos de la competición y prepara el modelo (sin entrenarlo)."""
     now = utc_now()
+    lower = comp.lower if include_lower else ()
     if comp.understat:
         matches, sources, current = understat_source.load(comp.understat, comp.code, UNDERSTAT_SEASONS, refresh,
                                                           now, progress)
         since = pd.Timestamp(f"{current - UNDERSTAT_SEASONS + 1}-07-01")  # la más antigua: historial previo
-        return build_league_data(comp.code, comp.name, matches[STANDARD_COLUMNS], sources, "xG", since)
+        matches = matches[STANDARD_COLUMNS]
+        if lower:  # historial de los recién ascendidos en la división inferior (xG aproximado de ESPN)
+            years = list(range(since.year - 1, now.year + 1))
+            lower_matches, lower_sources = _fetch_espn_years(list(lower), years, refresh, progress)
+            names = map_team_names(lower_matches, matches)
+            lower_matches = lower_matches.assign(home=lower_matches["home"].replace(names),
+                                                 away=lower_matches["away"].replace(names))
+            matches = pd.concat([matches, lower_matches[STANDARD_COLUMNS]], ignore_index=True)
+            sources = sources + lower_sources
+        return build_league_data(comp.code, comp.name, matches, sources, "xG", since)
 
     years_back = ESPN_CUP_YEARS if comp.is_cup else ESPN_LEAGUE_YEARS
     years = list(range(now.year - years_back + 1, now.year + 1))
-    slugs = [comp.code, *comp.pool]
+    slugs = [comp.code, *comp.pool, *lower]
     matches, sources = _fetch_espn_years(slugs, years, refresh, progress)
     played = matches[matches["played"]]
     coverage = played["h_sig"].notna().mean() if len(played) else 0.0
     signal = "xG aproximado (tiros)" if coverage >= 0.5 else "goles"
     since = pd.Timestamp(f"{years[0]}-01-01") + pd.Timedelta(days=180)  # medio año de historial previo
-    return build_league_data(comp.code, comp.name, matches, sources, signal, since)
+    cups = frozenset(c.code for c in COMPETITIONS if c.is_cup)
+    return build_league_data(comp.code, comp.name, matches, sources, signal, since, train_on_focus=not comp.is_cup,
+                             kappa_exclude=cups)
 
 
 # --------------------------------------------------------------------------
@@ -200,13 +252,6 @@ def next_kickoff(comp: Competition, after_utc: pd.Timestamp, session: requests.S
     return times.min() if len(times) else None
 
 
-def _name_score(a: str, b: str) -> float:
-    a, b = normalize(a), normalize(b)
-    if a in b or b in a:
-        return 1.0
-    return difflib.SequenceMatcher(None, a, b).ratio()
-
-
 def match_to_source(espn_rows: pd.DataFrame, source_rows: pd.DataFrame,
                     max_gap: pd.Timedelta = pd.Timedelta(hours=3)) -> dict[str, str]:
     """Empareja partidos de ESPN con los de otra fuente (Understat) por hora y nombres.
@@ -216,7 +261,7 @@ def match_to_source(espn_rows: pd.DataFrame, source_rows: pd.DataFrame,
         cand = source_rows[(source_rows["datetime"] - e.datetime).abs() <= max_gap]
         best, best_score = None, 0.0
         for s in cand.itertuples(index=False):
-            score = min(_name_score(e.home, s.home), _name_score(e.away, s.away))
+            score = min(team_similarity(e.home, s.home), team_similarity(e.away, s.away))
             if score > best_score:
                 best, best_score = s.id, score
         if best is not None and best_score >= 0.5:
@@ -275,5 +320,5 @@ def understat_fixture_with_odds(comp: Competition, data: LeagueData, match_id: s
 def coverage_note(comp: Competition, data: LeagueData) -> str:
     """Texto corto de la señal usada (y, en copas, cuántas ligas alimentan el modelo)."""
     if comp.is_cup:
-        return f"{data.signal_name} · junto a {len(comp.pool)} ligas"
+        return f"{data.signal_name} · junto a {sum(c not in UEFA_CUPS + CONMEBOL_CUPS for c in comp.pool)} ligas"
     return data.signal_name

@@ -344,3 +344,117 @@ def test_resolve_team(query, expected):
 def test_resolve_team_unknown_raises():
     with pytest.raises(mm.PredictionError):
         mm.resolve_team("Real Madrid", ["Arsenal", "Leeds"])
+
+
+# --------------------------------------------------------------------------
+# Calibraciones (competición, recién llegados, total de goles)
+# --------------------------------------------------------------------------
+
+
+def test_competition_kappa_ratio_with_prior_and_exclusion():
+    comp = np.array(["liga"] * 100 + ["copa"] * 100)
+    hg, ag = np.full(200, 2.0), np.full(200, 1.0)
+    lam_h, lam_a = np.full(200, 1.0), np.full(200, 1.0)
+    kappa = mm.competition_kappa(comp, hg, ag, lam_h, lam_a, exclude=frozenset({"copa"}))
+    assert ("copa", "h") not in kappa
+    assert 1.0 < kappa[("liga", "h")] < 2.0  # goles reales el doble de lo esperado, suavizado hacia 1
+    assert kappa[("liga", "a")] == pytest.approx(1.0)
+    lh, la = mm.apply_kappa(np.array(["liga", "copa"]), np.array([1.0, 1.0]), np.array([1.0, 1.0]), kappa)
+    assert lh[0] == pytest.approx(kappa[("liga", "h")]) and lh[1] == 1.0
+
+
+def test_newcomer_factors_detect_weaker_promoted_teams():
+    rng = np.random.default_rng(3)
+    n = 2000
+    new_h = rng.random(n) < 0.2
+    new_a = (rng.random(n) < 0.2) & ~new_h
+    lam_h, lam_a = np.full(n, 1.5), np.full(n, 1.2)
+    true_h = lam_h * np.where(new_h, 0.8, 1.0) * np.where(new_a, 1.3, 1.0)
+    true_a = lam_a * np.where(new_a, 0.8, 1.0) * np.where(new_h, 1.3, 1.0)
+    own, rival = mm.newcomer_factors(rng.poisson(true_h), rng.poisson(true_a), lam_h, lam_a, new_h, new_a)
+    assert own == pytest.approx(0.8, abs=0.06) and rival == pytest.approx(1.3, abs=0.08)
+
+
+def test_shrink_totals_keeps_ratio_and_moves_total_to_mean():
+    comp = np.array(["liga", "liga"])
+    lam_h, lam_a = np.array([2.4, 0.9]), np.array([1.2, 0.6])
+    same = mm.shrink_totals(comp, lam_h, lam_a, 1.0, {"liga": 2.5})
+    np.testing.assert_allclose(same[0], lam_h)
+    flat_h, flat_a = mm.shrink_totals(comp, lam_h, lam_a, 0.0, {"liga": 2.5})
+    np.testing.assert_allclose(flat_h + flat_a, [2.5, 2.5])
+    np.testing.assert_allclose(flat_h / flat_a, lam_h / lam_a)
+
+
+# --------------------------------------------------------------------------
+# Recién ascendidos: nombres entre divisiones
+# --------------------------------------------------------------------------
+
+
+def _season_rows(home: str, away: str, date: str) -> dict:
+    return {"home": home, "away": away, "datetime": pd.Timestamp(date)}
+
+
+def test_map_team_names_links_same_club_across_divisions():
+    upper = pd.DataFrame([_season_rows("Leeds", "Arsenal", "2025-09-01"), _season_rows("Sheffield United", "Arsenal", "2023-09-01"),
+                          _season_rows("Burnley", "Arsenal", "2025-10-01")])
+    lower = pd.DataFrame([_season_rows("Leeds United", "Hull City", "2024-09-01"),
+                          _season_rows("Sheffield Wednesday", "Hull City", "2024-10-01"),
+                          _season_rows("Burnley", "Hull City", "2025-11-01")])  # misma temporada: no es el mismo club
+    mapping = comps.map_team_names(lower, upper)
+    assert mapping == {"Leeds United": "Leeds"}
+
+
+def test_team_similarity_examples():
+    assert mm.team_similarity("Club Leon", "León") == 1.0
+    assert mm.team_similarity("Wolves", "Wolverhampton Wanderers") == 1.0  # alias
+    assert mm.team_similarity("Leeds", "Leeds United") >= comps.MIN_MAPPING_SIMILARITY
+    assert mm.team_similarity("Sheffield United", "Sheffield Wednesday") < comps.MIN_MAPPING_SIMILARITY
+
+
+# --------------------------------------------------------------------------
+# Backtest contra el mercado
+# --------------------------------------------------------------------------
+
+
+def test_football_data_parsing_prefers_pinnacle_and_drops_corrupt_odds():
+    from src import football_data_source as fds
+    raw = pd.DataFrame({
+        "Date": ["15/08/2025", "16/08/2025", "17/08/2025"], "HomeTeam": ["Liverpool", "Man United", "Wolves"],
+        "AwayTeam": ["Bournemouth", "Arsenal", "Leeds"], "FTHG": [4, 0, 1], "FTAG": [2, 1, 1],
+        "PSCH": [1.29, 4.0, 9.0], "PSCD": [6.55, 3.8, 9.0], "PSCA": [9.75, 1.9, 9.0],  # 3.ª: suma 0.33, corrupta
+        "AvgCH": [1.29, 4.1, 2.6], "AvgCD": [6.0, 3.7, 3.3], "AvgCA": [8.7, 1.85, 2.9],
+        "PC>2.5": [1.5, 2.0, 2.1], "PC<2.5": [2.6, 1.85, 1.75],
+    })
+    df = fds._standardize(raw, "HomeTeam", "AwayTeam", "FTHG", "FTAG")
+    assert list(df["odds_source"]) == ["Pinnacle (cierre)", "Pinnacle (cierre)", "media del mercado (cierre)"]
+    assert df.loc[2, "odds_h"] == 2.6
+    assert df.loc[0, "date"] == pd.Timestamp("2025-08-15")
+    assert df["odds_over25"].notna().all()
+
+
+def test_match_predictions_uses_date_score_and_names():
+    from src import backtest
+    preds = pd.DataFrame({"datetime": pd.to_datetime(["2025-08-16 19:00", "2025-08-17 14:00"]),
+                          "home": ["Manchester United", "Wolverhampton Wanderers"], "away": ["Arsenal", "Leeds"],
+                          "hg": [0.0, 1.0], "ag": [1.0, 1.0]})
+    fd_rows = pd.DataFrame({"date": pd.to_datetime(["2025-08-17", "2025-08-17", "2025-08-17"]),
+                            "home": ["Man United", "Wolves", "Chelsea"], "away": ["Arsenal", "Leeds", "Fulham"],
+                            "hg": [0.0, 1.0, 1.0], "ag": [1.0, 1.0, 1.0], "odds_h": [4.0, 2.6, 1.5]})
+    matched = backtest.match_predictions(preds, fd_rows)
+    assert list(matched["home_fd"]) == ["Man United", "Wolves"]
+
+
+def test_backtest_run_with_synthetic_odds(trained_league, monkeypatch):
+    from src import backtest
+    preds = trained_league.trained.val_predictions
+    p = preds[[f"p_ensemble_{c}" for c in mm.CLASSES]].to_numpy()
+    odds = 1 / (p * 1.05)  # mercado "justo" igual al modelo con un 5% de margen
+    fake = pd.DataFrame({"date": preds["datetime"].dt.normalize(), "home": preds["home"], "away": preds["away"],
+                         "hg": preds["hg"], "ag": preds["ag"], "odds_h": odds[:, 0], "odds_d": odds[:, 1],
+                         "odds_a": odds[:, 2], "odds_over25": np.nan, "odds_under25": np.nan,
+                         "odds_source": "sintéticas"})
+    monkeypatch.setattr(backtest.fd, "load", lambda code, start, end: (fake, ["https://example.invalid"]))
+    r = backtest.run(trained_league)
+    assert r.n_matched == r.n_val == len(preds)
+    assert r.ll_market == pytest.approx(r.ll_model, abs=1e-9)  # mismas probabilidades una vez quitado el margen
+    assert 0.0 <= r.alpha <= 1.0 and len(r.roi) == len(backtest.ROI_THRESHOLDS)

@@ -146,6 +146,8 @@ football_predictor/
 │   ├── competitions.py         # Registro de ligas y copas, carga de datos, calendario y cuotas del día
 │   ├── understat_source.py     # Descarga de Understat (xG)
 │   ├── espn_source.py          # Descarga de ESPN (resultados, tiros, calendario, cuotas)
+│   ├── football_data_source.py # Descarga de football-data.co.uk (cuotas de cierre para el backtest)
+│   ├── backtest.py             # Backtest de las predicciones de validación contra las cuotas de cierre
 │   ├── visualizations.py       # Construcción de gráficos Plotly
 │   └── utils.py                 # Utilidades comunes (safe_divide, logging, formateo)
 │
@@ -178,6 +180,8 @@ football_predictor/
 | `src/match_model.py` | Modelo independiente de la fuente: fuerza ajustada por rival (señal y goles), Poisson con Dixon-Coles, regresión logística, ensemble, validación y predicción de un partido (con las probabilidades del mercado si hay cuotas). |
 | `src/competitions.py` | Registro de las 33 ligas y copas (fuente, región, pool de ligas de las copas), carga de sus datos, partidos del día y cruce de cuotas de ESPN con los partidos de Understat. |
 | `src/understat_source.py` | Descarga y caché del xG de Understat, convertido a las columnas estándar del modelo. |
+| `src/football_data_source.py` | Descarga y caché de football-data.co.uk: resultados con cuotas de cierre (Pinnacle o media del mercado, 1X2 y Over/Under), descartando cuotas corruptas. |
+| `src/backtest.py` | Cruza las predicciones de validación con las cuotas de cierre y compara log loss, mezcla modelo + mercado, Over/Under y ROI simulado. |
 | `src/espn_source.py` | Descarga y caché del marcador de ESPN (resultados, tiros, calendario, campo neutral, cuotas de DraftKings) y cálculo del xG aproximado con tiros. |
 | `src/visualizations.py` | Construye los gráficos Plotly (barras, radar, evolución de forma, mapas de calor, importancia de variables) a partir de datos ya calculados. |
 | `src/utils.py` | Funciones auxiliares compartidas: división segura, formateo de porcentajes/métricas, logging, semilla aleatoria y umbrales de suficiencia de datos. |
@@ -337,6 +341,7 @@ Desde la terminal:
 python3 modelo_prediccion.py "Arsenal" "Leeds" --liga "Premier League"
 python3 modelo_prediccion.py "América" "Monterrey" --liga "Liga MX" --detalle   # + los 10 partidos de cada equipo
 python3 modelo_prediccion.py "Real Madrid" "Bayern Munich" --liga Champions --refrescar
+python3 modelo_prediccion.py "Arsenal" "Leeds" --backtest                         # + comparación con las cuotas de cierre
 python3 modelo_prediccion.py --listar                                            # ligas y copas disponibles
 ```
 
@@ -361,11 +366,25 @@ python3 modelo_prediccion.py --listar                                           
   las ligas de sus participantes (20 ligas UEFA, 10 CONMEBOL, 5 CONCACAF),
   así la fuerza de cada equipo sale sobre todo de su liga y los cruces entre
   países calibran unas ligas frente a otras.
-- Caché en `data/understat_cache/` y `data/espn_cache/`: lo pasado no
+- **football-data.co.uk** (solo para el backtest): resultados con cuotas de
+  cierre de las ligas principales y de Liga MX, MLS, Argentina, Brasil,
+  Japón y Rusia.
+- Caché en `data/understat_cache/`, `data/espn_cache/` y
+  `data/football_data_cache/`: lo pasado no
   caduca; la temporada o el año en curso, a las 3 horas (o con
   `--refrescar`). Si una descarga falla, el script se detiene y la página lo
   avisa: nunca se rellenan datos inventados. Ninguna fuente publica lesiones
   ni alineaciones.
+
+**Recién ascendidos.** En las ligas que tienen segunda división en ESPN
+(las 5 grandes, Championship, Serie B, Eredivisie, Süper Lig, Escocia,
+Argentina, Brasil, Colombia y Chile) esa división entra como historial: un
+ascendido llega con sus partidos de la temporada anterior. En las ligas de
+Understat los nombres se emparejan entre fuentes ("Leeds United" ↔ "Leeds")
+solo si se parecen mucho y nunca coinciden en la misma temporada. El salto de
+división se calibra con datos: un recién llegado (menos de 10 partidos en la
+competición en 12 meses) marca ~10-20% menos y recibe ~20-35% más de lo que
+diría su fuerza en la división inferior.
 
 **Modelo** (`src/match_model.py`).
 
@@ -373,39 +392,72 @@ python3 modelo_prediccion.py --listar                                           
    goles) se ajusta con los partidos de los 12 meses anteriores al día del
    partido el modelo multiplicativo `señal = media_sede · ataque ·
    defensa_rival` (ajuste proporcional iterativo, equivalente a máxima
-   verosimilitud de Poisson), con un suavizado de 2 partidos "de media de la
-   liga" por equipo que evita fuerzas extremas o nulas con pocos partidos.
-2. *Forma reciente y mezcla de señales:* ataque/defensa de los últimos 10
-   partidos (señal real / esperada según sede y rival) mezclados con la
-   fuerza de 12 meses, y la fuerza por señal mezclada con la fuerza por
-   goles. Ambos pesos se eligen con datos (máxima verosimilitud de los goles
-   reales en el periodo de entrenamiento).
-3. *Poisson con Dixon-Coles:* `λ = goles medios reales de la competición por
-   sede · ataque · defensa rival` (en campo neutral, la media de ambas
-   sedes). La corrección de Dixon-Coles ajusta los marcadores bajos (0-0,
-   1-0, 0-1, 1-1) con un ρ estimado por máxima verosimilitud. De la matriz
-   de marcadores salen el 1X2, el Over/Under 2.5, ambos anotan y los
-   marcadores más probables.
-4. *Regresión logística multinomial:* reajusta la señal de Poisson
-   (`log(λ local/λ visitante)`, `log(λ total)`) con la racha de puntos de los
-   últimos 5 partidos, los últimos 5 en casa del local y fuera del visitante
-   (localía) y el descanso en categorías (corto ≤4 días, normal 5-7, largo
-   ≥8). Se entrena con instantáneas pre-partido sin fuga de información y
-   elige su regularización con validación cruzada temporal.
-5. *Ensemble:* el peso Poisson/logística minimiza el log loss en el 30% más
+   verosimilitud de Poisson). Cada partido pesa según su antigüedad (el peso
+   se reduce a la mitad cada 120 días) y cada equipo arranca con 2 partidos
+   "de media de la liga" que evitan fuerzas extremas o nulas.
+2. *Mezcla de señales y forma:* la fuerza por señal se mezcla con la fuerza
+   por goles, y la de 12 meses con la de los últimos 10 partidos. Ambos pesos
+   se eligen con datos (máxima verosimilitud de los goles reales en el
+   periodo de entrenamiento).
+3. *Calibraciones de nivel* (también con datos de entrenamiento): goles por
+   competición y sede cuando se mezclan competiciones (κ; no en las copas,
+   donde empeoraba la validación), recién llegados, y el total de goles de
+   cada partido se acerca a la media de su competición (el producto ataque ×
+   defensa exagera las diferencias de total entre partidos: sin esto, las
+   probabilidades de Over 2.5 salían demasiado extremas).
+4. *Poisson con Dixon-Coles:* `λ = goles medios de la competición por sede ·
+   ataque · defensa rival` (en campo neutral, la media de ambas sedes), con
+   la corrección de Dixon-Coles para los marcadores bajos (ρ por máxima
+   verosimilitud). De la matriz de marcadores salen el 1X2, el Over/Under
+   2.5, ambos anotan y los marcadores más probables.
+5. *Regresión logística multinomial:* reajusta la señal de Poisson
+   (`log(λ local/λ visitante)`, `log(λ total)` y las probabilidades 1X2 de
+   Poisson como `log(P local/P empate)` y `log(P visitante/P empate)`) con la
+   racha de puntos de los últimos 5 partidos, los últimos 5 en casa del local
+   y fuera del visitante (localía) y el descanso en categorías (corto ≤4
+   días, normal 5-7, largo ≥8). Se entrena con instantáneas pre-partido sin
+   fuga de información y elige su regularización con validación cruzada
+   temporal.
+6. *Ensemble:* el peso Poisson/logística minimiza el log loss en el 30% más
    reciente del histórico, que la logística no vio al entrenar. Para
    Over/Under y ambos anotan, la matriz de Poisson se reescala para que
    reproduzca el 1X2 final.
 
+En las ligas, las filas de entrenamiento son solo partidos de la propia
+competición (la división inferior solo aporta historial). Se entrena con los
+partidos en los que ambos equipos tienen al menos 5 partidos de historial y
+se valida con todos, como se usa el modelo.
+
 **Validación** (log loss 1X2 en el 30% más reciente; la referencia es
 predecir siempre las frecuencias de 1/X/2 del entrenamiento): las 33
-competiciones mejoran la referencia, de +0.013 (Uruguay, solo goles) a
-+0.159 (Primeira Liga). Ejemplos: Premier League 1.029 (referencia 1.091),
-LaLiga 0.974 (1.052), Bundesliga 0.976 (1.077), Liga MX 1.028 (1.057),
-Brasileirão 0.998 (1.038), Champions (con su pool) 1.006 (1.069). Frente a la
-versión anterior, la mezcla xG/goles, el suavizado y Dixon-Coles bajaron el
-log loss de la Premier League de 1.041 a 1.029. La página muestra la tabla de
-validación de los modelos del día en "Cómo funciona y limitaciones".
+competiciones mejoran la referencia, de +0.014 (Uruguay, solo goles) a
++0.161 (Primeira Liga). La sección "Rendimiento del modelo" de la página
+muestra la validación y el backtest de cada competición.
+
+**Backtest contra el mercado** (`src/backtest.py`, `src/football_data_source.py`).
+Las predicciones de validación se cruzan (fecha ±1 día, marcador y nombres)
+con las **cuotas de cierre** de football-data.co.uk (Pinnacle; si no, la
+media del mercado; se descartan cuotas corruptas con margen fuera de 0-25%)
+en las 21 competiciones que publica: las 5 grandes y sus segundas
+divisiones, liga rusa, Portugal, Países Bajos, Bélgica, Turquía, Escocia,
+Liga MX, MLS, Argentina, Brasil y Japón. Resultado en 7.328 partidos:
+
+- El modelo queda **+0.020 de log loss por detrás del cierre** (p. ej.
+  Premier League 1.038 vs 1.018, LaLiga 0.976 vs 0.954, Bundesliga 0.975 vs
+  0.960, Liga MX 1.032 vs 1.006). Over/Under 2.5: +0.01.
+- Mezclar modelo y mercado casi nunca mejora al mercado solo (peso medio del
+  modelo 5%): el cierre ya contiene la información del modelo. La excepción
+  es la liga rusa (mercado poco líquido tras las sanciones; 213 partidos),
+  donde el modelo es algo mejor que el cierre.
+- El ROI simulado apostando a la cuota de cierre cuando el modelo se aleja
+  del mercado es negativo en casi todas las ligas: las diferencias con el
+  mercado no son, en general, oportunidades.
+- Mejoras medidas sobre los mismos partidos en esta versión: variables de
+  Poisson en la logística (−0.0004), decaimiento temporal (−0.0006),
+  historial de la división inferior (−0.0006), acercamiento del total
+  (Over/Under 0.6851 → 0.6802).
+
+Desde la terminal: `python3 modelo_prediccion.py "Arsenal" "Leeds" --backtest`.
 
 ## Formato de archivo esperado
 

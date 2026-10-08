@@ -19,3 +19,6 @@ data/understat_cache/
 
 # Caché de descargas de ESPN (src/espn_source.py; se regenera sola).
 data/espn_cache/
+
+# Caché de football-data.co.uk (src/football_data_source.py; se regenera sola).
+data/football_data_cache/

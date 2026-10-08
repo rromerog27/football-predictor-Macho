@@ -57,6 +57,7 @@ WINDOW_DAYS = 365  # ventana de la fuerza "de fondo" (ajustada por rival)
 MIN_WINDOW_MATCHES = 50  # partidos en la ventana necesarios para ajustar las fuerzas
 MIN_MATCHES = 5  # mínimo de partidos de cada equipo para usar un partido al entrenar
 PRIOR_MATCHES = 2.0  # suavizado: cada equipo arranca con 2 partidos "de media de la liga"
+DECAY_HALF_LIFE_DAYS: float | None = 120.0  # peso de los partidos de la ventana: se reduce a la mitad cada 120 días
 IPF_ITERATIONS = 25
 MAX_GOALS = 10
 LAMBDA_MIN, LAMBDA_MAX = 0.1, 5.0
@@ -66,7 +67,14 @@ SHRINK_GRID = (0.0, 2.0, 5.0, 10.0, 20.0, 40.0, 1e9)
 # Peso de la señal (xG / xG aproximado) frente a los goles en la fuerza.
 SIGNAL_WEIGHT_GRID = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.2, 0.0)
 RHO_BOUNDS = (-0.2, 0.2)
+# Peso del total de goles propio del partido frente a la media de la competición (1 = sin acercar).
+TOTAL_SHRINK_GRID = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3)
 VAL_FRACTION = 0.3
+KAPPA_PRIOR_MATCHES = 20  # suavizado de la calibración de goles por competición (partidos de "media")
+FOCUS_MIN_VAL = 150  # partidos de validación de la propia competición para evaluarla solo con ellos
+# "Recién llegado": menos de estos partidos en la competición en los últimos 12 meses (ascendidos).
+# Su fuerza sale de pocos partidos o de otra división, con un sesgo de nivel que se calibra con datos.
+NEWCOMER_MATCHES = 10
 MIN_TRAIN_ROWS, MIN_VAL_ROWS = 200, 60
 ENSEMBLE_WEIGHT_GRID = np.round(np.arange(0.0, 1.0001, 0.05), 2)
 CLASSES = ["H", "D", "A"]
@@ -77,6 +85,8 @@ FIXTURE_HORIZON_DAYS = 14
 NUMERIC_FEATURES = [
     "log_lambda_ratio",
     "log_lambda_total",
+    "poisson_home_vs_draw",
+    "poisson_away_vs_draw",
     "ppg5_home",
     "ppg5_away",
     "ppg5_home_at_home",
@@ -123,6 +133,31 @@ def normalize(text: str) -> str:
     return " ".join(text.lower().replace("-", " ").replace(".", " ").split())
 
 
+# Palabras genéricas que no distinguen equipos al comparar nombres entre fuentes.
+NAME_STOPWORDS = {"fc", "cf", "afc", "sc", "ac", "cd", "club", "de", "del", "la", "el", "the", "ud", "sd", "ca",
+                  "fk", "sk", "if", "bk", "ss", "us", "as", "cp"}
+
+
+def _name_tokens(name: str) -> list[str]:
+    name = TEAM_ALIASES.get(normalize(name), name)
+    return [t for t in normalize(name).replace("'", "").split() if t not in NAME_STOPWORDS]
+
+
+def team_similarity(a: str, b: str) -> float:
+    """Parecido (0-1) entre dos nombres del mismo equipo en fuentes distintas
+    ("Club Leon" ~ "León", "Man United" ~ "Manchester United", "Leeds" ~ "Leeds United")."""
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    ja, jb = " ".join(ta), " ".join(tb)
+    if ja == jb:
+        return 1.0
+    if ja in jb or jb in ja:
+        return 0.95
+    overlap = len(set(ta) & set(tb)) / min(len(set(ta)), len(set(tb)))
+    return max(0.9 * overlap, difflib.SequenceMatcher(None, ja, jb).ratio())
+
+
 def resolve_team(name: str, teams: list[str]) -> str:
     query = normalize(name)
     by_norm = {normalize(t): t for t in teams}
@@ -143,7 +178,7 @@ def resolve_team(name: str, teams: list[str]) -> str:
 def team_long_frame(played: pd.DataFrame) -> pd.DataFrame:
     """Una fila por equipo y partido jugado (vista desde ese equipo)."""
     common = {"id": played["id"], "season": played["season"], "datetime": played["datetime"],
-              "neutral": played["neutral"]}
+              "neutral": played["neutral"], "competition": played["competition"]}
     home = pd.DataFrame(
         {**common, "team": played["home"], "opp": played["away"], "venue": "h",
          "gf": played["hg"], "ga": played["ag"], "sf": played["h_sig"], "sa": played["a_sig"]}
@@ -162,9 +197,10 @@ class MatchIndex:
     cortar el historial anterior a cualquier instante sin filtrar DataFrames.
     Con `has_signal=False` la señal es la propia columna de goles."""
 
-    def __init__(self, played: pd.DataFrame, has_signal: bool = True):
+    def __init__(self, played: pd.DataFrame, has_signal: bool = True, focus: str | None = None):
         self.played = played.sort_values(["datetime", "id"]).reset_index(drop=True)
         self.has_signal = has_signal
+        self.focus = focus  # competición que se predice (cuenta los partidos "en la competición")
         self.teams = sorted(set(self.played["home"]) | set(self.played["away"]))
         self.team_id = {t: i for i, t in enumerate(self.teams)}
         p = self.played
@@ -189,6 +225,7 @@ class MatchIndex:
                 "gls_for": rows["gf"].to_numpy(float),
                 "gls_against": rows["ga"].to_numpy(float),
                 "pts": rows["pts"].to_numpy(float),
+                "in_focus": (rows["competition"] == focus).to_numpy() if focus else np.ones(len(rows), bool),
             }
             for team, rows in self.team_rows.items()
         }
@@ -226,7 +263,8 @@ class LeagueRatings:
 
 
 def fit_ratings_arrays(h: np.ndarray, a: np.ndarray, hs: np.ndarray, as_: np.ndarray, neutral: np.ndarray,
-                       hg: np.ndarray, ag: np.ndarray, index: dict[str, int]) -> LeagueRatings:
+                       hg: np.ndarray, ag: np.ndarray, index: dict[str, int],
+                       weights: np.ndarray | None = None) -> LeagueRatings:
     """Modelo multiplicativo señal = μ_sede · ataque · defensa_rival, ajustado por
     ajuste proporcional iterativo (máxima verosimilitud de Poisson sobre la
     señal), con un suavizado de PRIOR_MATCHES partidos de media de la liga que
@@ -239,14 +277,15 @@ def fit_ratings_arrays(h: np.ndarray, a: np.ndarray, hs: np.ndarray, as_: np.nda
     mh = np.where(neutral, mid, mu_h)  # media esperada del "local" de cada partido
     ma = np.where(neutral, mid, mu_a)
 
+    wt = np.ones(len(h)) if weights is None else weights  # peso de cada partido (decaimiento temporal)
     prior = PRIOR_MATCHES * mid
-    sig_for = np.bincount(h, hs, n) + np.bincount(a, as_, n) + prior
-    sig_against = np.bincount(h, as_, n) + np.bincount(a, hs, n) + prior
+    sig_for = np.bincount(h, wt * hs, n) + np.bincount(a, wt * as_, n) + prior
+    sig_against = np.bincount(h, wt * as_, n) + np.bincount(a, wt * hs, n) + prior
     attack, defense = np.ones(n), np.ones(n)
     for _ in range(IPF_ITERATIONS):
-        attack = sig_for / (np.bincount(h, mh * defense[a], n) + np.bincount(a, ma * defense[h], n) + prior)
-        defense = sig_against / (np.bincount(h, ma * attack[a], n) + np.bincount(a, mh * attack[h], n) + prior)
-    games = np.bincount(h, minlength=n) + np.bincount(a, minlength=n)
+        attack = sig_for / (np.bincount(h, wt * mh * defense[a], n) + np.bincount(a, wt * ma * defense[h], n) + prior)
+        defense = sig_against / (np.bincount(h, wt * ma * attack[a], n) + np.bincount(a, wt * mh * attack[h], n) + prior)
+    games = np.bincount(h, wt, n) + np.bincount(a, wt, n)
     scale = np.average(attack, weights=games)
     return LeagueRatings(index, float(mu_h), float(mu_a), float(hg[regular].mean()), float(ag[regular].mean()),
                          attack / scale, defense * scale)
@@ -295,6 +334,7 @@ def team_snapshot(index: MatchIndex, team: str, venue: str, cutoff: pd.Timestamp
     pts = arrays["pts"]
     snap = {
         "n_window": end - start,
+        "n_focus": int(arrays["in_focus"][start:end].sum()),
         "n_recent": recent.stop - recent.start,
         "ppg5": float(pts[form].mean()),
         "ppg5_venue": float(pts[same_venue].mean()) if len(same_venue) else float(pts[form].mean()),
@@ -325,7 +365,11 @@ def window_ratings(index: MatchIndex, cutoff: pd.Timestamp, cache: dict) -> dict
         else:
             arr = {k: v[w] for k, v in index.arrays.items()}
             common = (arr["h"], arr["a"])
-            rest = (arr["neutral"], arr["gls_h"], arr["gls_a"], index.team_id)
+            weights = None
+            if DECAY_HALF_LIFE_DAYS:
+                age = (day.to_datetime64() - index.times[w]) / np.timedelta64(1, "D")
+                weights = 0.5 ** (age / DECAY_HALF_LIFE_DAYS)
+            rest = (arr["neutral"], arr["gls_h"], arr["gls_a"], index.team_id, weights)
             sig = fit_ratings_arrays(*common, arr["sig_h"], arr["sig_a"], *rest)
             gls = fit_ratings_arrays(*common, arr["gls_h"], arr["gls_a"], *rest) if index.has_signal else sig
             cache[day] = {"sig": sig, "gls": gls}
@@ -457,28 +501,32 @@ def snapshot_columns(h: dict, a: dict) -> dict:
     }
 
 
-def build_history(index: MatchIndex, since: pd.Timestamp) -> pd.DataFrame:
-    """Instantánea pre-partido (solo con datos anteriores a cada partido) de
-    todos los partidos jugados desde `since`."""
+def build_history(index: MatchIndex, since: pd.Timestamp, competition: str | None = None) -> pd.DataFrame:
+    """Instantánea pre-partido (solo con datos anteriores a cada partido) de los
+    partidos jugados desde `since` (solo de `competition` si se indica; el resto
+    de partidos sigue contando como historial de las fuerzas)."""
     rows, cache = [], {}
     played = index.played
+    if competition is not None:
+        played = played[played["competition"] == competition]
     for m in played[played["datetime"] >= since].itertuples(index=False):
         snap = match_snapshot(index, m.home, m.away, m.datetime, cache)
         if snap is None:
             continue
         h, a, ratings = snap
-        if h["n_window"] < MIN_MATCHES or a["n_window"] < MIN_MATCHES:
-            continue
         rows.append(
             {
                 "competition": m.competition,
                 "datetime": m.datetime,
+                "home": m.home,
+                "away": m.away,
                 "neutral": bool(m.neutral),
                 "hg": m.hg,
                 "ag": m.ag,
                 "result": "H" if m.hg > m.ag else ("D" if m.hg == m.ag else "A"),
                 "goals_home": ratings["gls"].goals_home,
                 "goals_away": ratings["gls"].goals_away,
+                "low_data": min(h["n_window"], a["n_window"]) < MIN_MATCHES,  # no se entrena con ellas
                 **snapshot_columns(h, a),
             }
         )
@@ -498,11 +546,14 @@ def history_lambdas(hist: pd.DataFrame, shrink: float, signal_weight: float) -> 
     return lam_h, lam_a
 
 
-def history_features(hist: pd.DataFrame, lam_h: np.ndarray, lam_a: np.ndarray) -> pd.DataFrame:
+def history_features(hist: pd.DataFrame, lam_h: np.ndarray, lam_a: np.ndarray, p_poisson: np.ndarray) -> pd.DataFrame:
+    p = np.clip(p_poisson, 1e-6, 1)
     return pd.DataFrame(
         {
             "log_lambda_ratio": np.log(lam_h / lam_a),
             "log_lambda_total": np.log(lam_h + lam_a),
+            "poisson_home_vs_draw": np.log(p[:, 0] / p[:, 1]),  # la forma no lineal del empate según Poisson
+            "poisson_away_vs_draw": np.log(p[:, 2] / p[:, 1]),
             "ppg5_home": hist["h_ppg5"],
             "ppg5_away": hist["a_ppg5"],
             "ppg5_home_at_home": hist["h_ppg5_venue"],
@@ -545,83 +596,201 @@ def predict_hda(model: Pipeline, features: pd.DataFrame) -> np.ndarray:
     return proba[:, order]
 
 
+def competition_kappa(competition: np.ndarray, hg: np.ndarray, ag: np.ndarray, lam_h: np.ndarray,
+                      lam_a: np.ndarray, exclude: frozenset[str] = frozenset()) -> dict[tuple[str, str], float]:
+    """Calibración del nivel de goles por competición y sede: goles reales / goles esperados,
+    con un suavizado de KAPPA_PRIOR_MATCHES partidos. Corrige que la base de λ sea la media
+    de todas las competiciones mezcladas (divisiones inferiores, copas con sus ligas)."""
+    df = pd.DataFrame({"c": competition, "hg": hg, "ag": ag, "lh": lam_h, "la": lam_a})
+    g = df.groupby("c").agg(hg=("hg", "sum"), ag=("ag", "sum"), lh=("lh", "sum"), la=("la", "sum"), n=("hg", "size"))
+    kappa = {}
+    for comp, r in g.iterrows():
+        if comp in exclude:
+            continue
+        for side, goals, lam in (("h", r.hg, r.lh), ("a", r.ag, r.la)):
+            prior = KAPPA_PRIOR_MATCHES * lam / r.n
+            kappa[(comp, side)] = float((goals + prior) / (lam + prior))
+    return kappa
+
+
+def apply_kappa(competition: np.ndarray, lam_h: np.ndarray, lam_a: np.ndarray,
+                kappa: dict[tuple[str, str], float]) -> tuple[np.ndarray, np.ndarray]:
+    kh = np.array([kappa.get((c, "h"), 1.0) for c in competition])
+    ka = np.array([kappa.get((c, "a"), 1.0) for c in competition])
+    return np.clip(lam_h * kh, LAMBDA_MIN, LAMBDA_MAX), np.clip(lam_a * ka, LAMBDA_MIN, LAMBDA_MAX)
+
+
+def newcomer_factors(hg: np.ndarray, ag: np.ndarray, lam_h: np.ndarray, lam_a: np.ndarray, new_h: np.ndarray,
+                     new_a: np.ndarray) -> tuple[float, float]:
+    """Calibración de los recién llegados: (factor de sus goles esperados, factor de los del rival),
+    goles reales / esperados con un suavizado de KAPPA_PRIOR_MATCHES partidos."""
+    scored = np.concatenate([hg[new_h], ag[new_a]])
+    own = np.concatenate([lam_h[new_h], lam_a[new_a]])
+    conceded = np.concatenate([ag[new_h], hg[new_a]])
+    rival = np.concatenate([lam_a[new_h], lam_h[new_a]])
+    if len(own) == 0:
+        return 1.0, 1.0
+    prior_own, prior_rival = KAPPA_PRIOR_MATCHES * own.mean(), KAPPA_PRIOR_MATCHES * rival.mean()
+    return (float((scored.sum() + prior_own) / (own.sum() + prior_own)),
+            float((conceded.sum() + prior_rival) / (rival.sum() + prior_rival)))
+
+
+def shrink_totals(competition, lam_h, lam_a, shrink: float, total_mean: dict[str, float]):
+    """Acerca el total de goles esperado a la media de su competición (en log, con peso
+    1 − shrink) manteniendo la proporción local/visitante: el producto ataque × defensa
+    exagera las diferencias de total entre partidos."""
+    if shrink >= 1:
+        return lam_h, lam_a
+    total = lam_h + lam_a
+    mean = np.array([total_mean.get(c, np.nan) for c in np.atleast_1d(competition)], dtype=float)
+    mean = np.where(np.isfinite(mean), mean, total)
+    factor = mean ** (1 - shrink) * total ** shrink / total
+    return np.clip(lam_h * factor, LAMBDA_MIN, LAMBDA_MAX), np.clip(lam_a * factor, LAMBDA_MIN, LAMBDA_MAX)
+
+
+def apply_newcomer(lam_h, lam_a, new_h, new_a, own: float, rival: float):
+    lam_h = lam_h * np.where(new_h, own, 1.0) * np.where(new_a, rival, 1.0)
+    lam_a = lam_a * np.where(new_a, own, 1.0) * np.where(new_h, rival, 1.0)
+    return np.clip(lam_h, LAMBDA_MIN, LAMBDA_MAX), np.clip(lam_a, LAMBDA_MIN, LAMBDA_MAX)
+
+
 @dataclass
 class TrainedModels:
     shrink: float  # peso de la fuerza de 12 meses frente a la forma reciente
     signal_weight: float  # peso de la señal (xG / xG aproximado) frente a los goles
     rho: float  # corrección de Dixon-Coles
+    kappa: dict  # calibración de goles por (competición, sede)
+    newcomer: tuple[float, float]  # recién llegados: (factor de sus goles, factor de los del rival)
+    total_shrink: float  # peso del total de goles propio frente a la media de la competición
+    total_mean: dict  # total de goles esperado medio por competición
     logistic: Pipeline
     w_poisson: float
     n_train: int
-    n_val: int
+    n_val: int  # partidos de validación evaluados (los de la competición si hay suficientes)
     val_period: str
     ll_poisson: float
     ll_logistic: float
     ll_ensemble: float
     ll_baseline: float  # predecir siempre las frecuencias 1/X/2 del entrenamiento (referencia)
+    val_predictions: pd.DataFrame = field(repr=False)  # predicciones fuera de muestra (para el backtest)
+    evaluated_on: str = "all"  # "focus" (solo la competición) o "all" (todo el pool)
     n_val_focus: int = 0  # partidos de validación de la propia competición (copas con pool)
     ll_ensemble_focus: float | None = None
 
 
-def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None = None) -> TrainedModels:
+def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None = None,
+                 kappa_exclude: frozenset[str] = frozenset()) -> TrainedModels:
+    """Entrena Poisson + logística sobre el histórico de instantáneas. `kappa_exclude`: competiciones
+    sin calibración propia de goles (las copas: pocos partidos, y en validación empeoraba)."""
     hist = hist.sort_values("datetime").reset_index(drop=True)
     n_val = max(MIN_VAL_ROWS, int(len(hist) * VAL_FRACTION))
     if len(hist) - n_val < MIN_TRAIN_ROWS:
         raise PredictionError(f"Histórico insuficiente para entrenar y validar el modelo ({len(hist)} partidos).")
-    train_mask = np.arange(len(hist)) < len(hist) - n_val
-    val_mask = ~train_mask
+    in_train = np.arange(len(hist)) < len(hist) - n_val
+    val_mask = ~in_train
+    # Se ajusta solo con partidos con datos suficientes; se valida con todos (como se usa el modelo).
+    low = hist["low_data"].to_numpy(bool) if "low_data" in hist else np.zeros(len(hist), bool)
+    train_mask = in_train & ~low
     train = hist[train_mask]
+    comp = hist["competition"].to_numpy()
+    hg, ag = hist["hg"].to_numpy(float), hist["ag"].to_numpy(float)
 
-    # 1) Forma reciente vs. 12 meses y señal vs. goles: máxima verosimilitud de los goles reales (entrenamiento).
+    # 1) Forma reciente vs. 12 meses, señal vs. goles y calibración por competición:
+    #    máxima verosimilitud de los goles reales en el periodo de entrenamiento.
     weights = SIGNAL_WEIGHT_GRID if has_signal else (1.0,)
-    best, best_ll = (SHRINK_GRID[0], weights[0]), -np.inf
+    best, best_ll = None, -np.inf
     for shrink in SHRINK_GRID:
         for sw in weights:
-            lam_h, lam_a = history_lambdas(train, shrink, sw)
-            ll = poisson.logpmf(train["hg"], lam_h).sum() + poisson.logpmf(train["ag"], lam_a).sum()
+            lh, la = history_lambdas(train, shrink, sw)
+            kappa = competition_kappa(comp[train_mask], hg[train_mask], ag[train_mask], lh, la, kappa_exclude)
+            lh, la = apply_kappa(comp[train_mask], lh, la, kappa)
+            ll = poisson.logpmf(hg[train_mask], lh).sum() + poisson.logpmf(ag[train_mask], la).sum()
             if ll > best_ll:
-                best, best_ll = (shrink, sw), ll
-    shrink, signal_weight = best
+                best, best_ll = (shrink, sw, kappa), ll
+    shrink, signal_weight, kappa = best
 
-    lam_h, lam_a = history_lambdas(hist, shrink, signal_weight)
+    lam_h, lam_a = apply_kappa(comp, *history_lambdas(hist, shrink, signal_weight), kappa)
+    # 1b) Recién llegados (ascendidos): calibración de su nivel de goles a favor y en contra.
+    new_h = (hist["h_n_focus"] < NEWCOMER_MATCHES).to_numpy() if "h_n_focus" in hist else np.zeros(len(hist), bool)
+    new_a = (hist["a_n_focus"] < NEWCOMER_MATCHES).to_numpy() if "a_n_focus" in hist else np.zeros(len(hist), bool)
+    newcomer = newcomer_factors(hg[train_mask], ag[train_mask], lam_h[train_mask], lam_a[train_mask],
+                                new_h[train_mask], new_a[train_mask])
+    lam_h, lam_a = apply_newcomer(lam_h, lam_a, new_h, new_a, *newcomer)
+    # 1c) Total de goles: cuánto acercarlo a la media de la competición (verosimilitud en entrenamiento).
+    totals = pd.Series(lam_h[train_mask] + lam_a[train_mask]).groupby(comp[train_mask]).mean()
+    total_mean = {str(k): float(v) for k, v in totals.items()}
+    total_shrink, best_tll = 1.0, -np.inf
+    for ts in TOTAL_SHRINK_GRID:
+        th, ta = shrink_totals(comp[train_mask], lam_h[train_mask], lam_a[train_mask], ts, total_mean)
+        tll = poisson.logpmf(hg[train_mask], th).sum() + poisson.logpmf(ag[train_mask], ta).sum()
+        if tll > best_tll:
+            total_shrink, best_tll = ts, tll
+    lam_h, lam_a = shrink_totals(comp, lam_h, lam_a, total_shrink, total_mean)
     # 2) Dixon-Coles: ρ por máxima verosimilitud en entrenamiento.
-    rho = fit_rho(train["hg"].to_numpy(), train["ag"].to_numpy(), lam_h[train_mask], lam_a[train_mask])
+    rho = fit_rho(hg[train_mask], ag[train_mask], lam_h[train_mask], lam_a[train_mask])
     p_poisson = np.array([outcome_probs(score_matrix(lh, la, rho)) for lh, la in zip(lam_h, lam_a)])
-    features = history_features(hist, lam_h, lam_a)
+    features = history_features(hist, lam_h, lam_a, p_poisson)
     y = hist["result"].to_numpy()
 
     # 3) Regresión logística entrenada solo con el periodo anterior a la validación.
     logistic = fit_logistic(features[train_mask], y[train_mask])
-    p_logistic = predict_hda(logistic, features[val_mask])
+    p_logistic_val = predict_hda(logistic, features[val_mask])
 
-    # 4) Peso del ensemble que minimiza el log loss de validación.
-    y_val, p_pois_val = y[val_mask], p_poisson[val_mask]
-    losses = [multiclass_log_loss(y_val, w * p_pois_val + (1 - w) * p_logistic) for w in ENSEMBLE_WEIGHT_GRID]
+    # 4) Evaluación: la propia competición si tiene suficientes partidos de validación; si no, todo el pool.
+    in_focus = (comp == focus) if focus is not None else np.ones(len(hist), bool)
+    use_focus = focus is not None and (in_focus & val_mask).sum() >= FOCUS_MIN_VAL
+    eval_val = in_focus[val_mask] if use_focus else np.ones(val_mask.sum(), bool)
+    eval_train = in_focus[train_mask] if use_focus else np.ones(train_mask.sum(), bool)
+    y_val, p_pois_val = y[val_mask][eval_val], p_poisson[val_mask][eval_val]
+    p_log_val = p_logistic_val[eval_val]
+
+    # 5) Peso del ensemble que minimiza el log loss de validación.
+    losses = [multiclass_log_loss(y_val, w * p_pois_val + (1 - w) * p_log_val) for w in ENSEMBLE_WEIGHT_GRID]
     w_poisson = float(ENSEMBLE_WEIGHT_GRID[int(np.argmin(losses))])
 
-    focus_metrics = {}
-    if focus is not None:
-        in_focus = (hist.loc[val_mask, "competition"] == focus).to_numpy()
-        if in_focus.sum() >= 20:
-            p_ens = w_poisson * p_pois_val + (1 - w_poisson) * p_logistic
-            focus_metrics = {"n_val_focus": int(in_focus.sum()),
-                             "ll_ensemble_focus": multiclass_log_loss(y_val[in_focus], p_ens[in_focus])}
+    # Predicciones fuera de muestra de todo el periodo de validación (para el backtest contra el mercado).
+    val = hist[val_mask].reset_index(drop=True)
+    p_ens_all = w_poisson * p_poisson[val_mask] + (1 - w_poisson) * p_logistic_val
+    over = [goal_markets(reweight_matrix(score_matrix(lh, la, rho), pe))[0]
+            for lh, la, pe in zip(lam_h[val_mask], lam_a[val_mask], p_ens_all)]
+    val_predictions = pd.DataFrame({
+        "datetime": val["datetime"], "competition": val["competition"], "home": val["home"], "away": val["away"],
+        "hg": val["hg"], "ag": val["ag"], "result": val["result"],
+        "lam_h": lam_h[val_mask], "lam_a": lam_a[val_mask], "over25": over,
+        "newcomer": (new_h | new_a)[val_mask], "low_data": low[val_mask],
+        **{f"p_{k}_{c}": p[:, i] for k, p in (("poisson", p_poisson[val_mask]), ("logistic", p_logistic_val),
+                                              ("ensemble", p_ens_all)) for i, c in enumerate(CLASSES)},
+    })
 
-    val_dates = hist.loc[val_mask, "datetime"]
+    focus_metrics = {}
+    if focus is not None and not use_focus:
+        n_focus = int((in_focus & val_mask).sum())
+        if n_focus >= 20:
+            sub = in_focus[val_mask]
+            focus_metrics = {"n_val_focus": n_focus,
+                             "ll_ensemble_focus": multiclass_log_loss(y[val_mask][sub], p_ens_all[sub])}
+
+    val_dates = hist.loc[val_mask, "datetime"][eval_val]
+    train_freq = [np.mean(y[train_mask][eval_train] == c) for c in CLASSES]
     return TrainedModels(
         shrink=shrink,
         signal_weight=signal_weight,
         rho=rho,
-        logistic=fit_logistic(features, y),  # modelo final: todo el histórico
+        kappa=kappa,
+        newcomer=newcomer,
+        total_shrink=total_shrink,
+        total_mean=total_mean,
+        logistic=fit_logistic(features[~low], y[~low]),  # modelo final: todo el histórico con datos suficientes
         w_poisson=w_poisson,
         n_train=int(train_mask.sum()),
-        n_val=int(val_mask.sum()),
+        n_val=int(eval_val.sum()),
         val_period=f"{val_dates.min():%d/%m/%Y} – {val_dates.max():%d/%m/%Y}",
         ll_poisson=multiclass_log_loss(y_val, p_pois_val),
-        ll_logistic=multiclass_log_loss(y_val, p_logistic),
+        ll_logistic=multiclass_log_loss(y_val, p_log_val),
         ll_ensemble=float(min(losses)),
-        ll_baseline=multiclass_log_loss(
-            y_val, np.tile([np.mean(y[train_mask] == c) for c in CLASSES], (len(y_val), 1))),
+        ll_baseline=multiclass_log_loss(y_val, np.tile(train_freq, (len(y_val), 1))),
+        val_predictions=val_predictions,
+        evaluated_on="focus" if use_focus else "all",
         **focus_metrics,
     )
 
@@ -640,6 +809,8 @@ class LeagueData:
     sources: list[SourceInfo]
     signal_name: str  # "xG", "xG aproximado (tiros)" o "goles"
     training_since: pd.Timestamp  # primer partido usado como fila de entrenamiento
+    train_on_focus: bool = True  # filas de entrenamiento: solo la competición (ligas) o todo el pool (copas)
+    kappa_exclude: frozenset = frozenset()  # competiciones sin calibración propia de goles (copas)
 
     @property
     def focus_matches(self) -> pd.DataFrame:
@@ -654,7 +825,8 @@ class LeagueData:
 
 
 def build_league_data(competition: str, name: str, matches: pd.DataFrame, sources: list[SourceInfo],
-                      signal_name: str, training_since: pd.Timestamp) -> LeagueData:
+                      signal_name: str, training_since: pd.Timestamp, train_on_focus: bool = True,
+                      kappa_exclude: frozenset = frozenset()) -> LeagueData:
     """Prepara los partidos usables: jugados en 90 minutos, con goles y señal.
     Donde falta la señal (p. ej. un partido sin estadísticas de tiros) se usan los goles."""
     matches = matches.sort_values(["datetime", "id"]).reset_index(drop=True)
@@ -664,7 +836,9 @@ def build_league_data(competition: str, name: str, matches: pd.DataFrame, source
     usable["a_sig"] = usable["a_sig"].fillna(usable["ag"]) if has_signal else usable["ag"]
     if usable.empty:
         raise PredictionError(f"Sin partidos jugados para {name}.")
-    return LeagueData(competition, name, matches, MatchIndex(usable, has_signal), sources, signal_name, training_since)
+    index = MatchIndex(usable, has_signal, focus=competition if train_on_focus else None)
+    return LeagueData(competition, name, matches, index, sources, signal_name, training_since, train_on_focus,
+                      kappa_exclude)
 
 
 @dataclass
@@ -674,11 +848,12 @@ class LeagueModel:
 
 
 def train_league(data: LeagueData) -> LeagueModel:
-    hist = build_history(data.index, data.training_since)
+    hist = build_history(data.index, data.training_since, data.competition if data.train_on_focus else None)
     if hist.empty:
         raise PredictionError(f"Sin histórico suficiente para entrenar {data.name}.")
-    focus = data.competition if (hist["competition"] != data.competition).any() else None
-    return LeagueModel(data, train_models(hist, data.index.has_signal, focus))
+    pooled = (hist["competition"] != data.competition).any()
+    return LeagueModel(data, train_models(hist, data.index.has_signal, data.competition if pooled else None,
+                                          data.kappa_exclude))
 
 
 @dataclass
@@ -708,6 +883,8 @@ class MatchPrediction:
     trained: TrainedModels = field(repr=False)
     url: str | None = None
     signal_name: str = "xG"  # señal de calidad de ocasiones de la competición
+    base_home: float = float("nan")  # goles medios esperados del local de la competición (con su calibración)
+    base_away: float = float("nan")
 
     @property
     def signal_short(self) -> str:
@@ -718,6 +895,12 @@ class MatchPrediction:
         t = self.trained
         return (strength(snap, t.shrink, t.signal_weight, "att"),
                 strength(snap, t.shrink, t.signal_weight, "def"))
+
+    @property
+    def newcomers(self) -> list[str]:
+        """Equipos con menos de NEWCOMER_MATCHES partidos en la competición en 12 meses (p. ej. ascendidos)."""
+        return [name for name, snap in ((self.home, self.home_snap), (self.away, self.away_snap))
+                if snap["n_focus"] < NEWCOMER_MATCHES]
 
     @property
     def low_data(self) -> bool:
@@ -760,10 +943,18 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
     if snap is None:
         raise PredictionError(f"Sin datos de los últimos {WINDOW_DAYS} días para {home} o {away}.")
     h, a, ratings = snap
+    comp = str(fixture["competition"]) if fixture is not None and "competition" in fixture else data.competition
+    kh, ka = t.kappa.get((comp, "h"), 1.0), t.kappa.get((comp, "a"), 1.0)
     lam_h, lam_a = expected_goals(h, a, ratings, t.shrink, t.signal_weight, neutral)
+    lam_h, lam_a = float(np.clip(lam_h * kh, LAMBDA_MIN, LAMBDA_MAX)), float(np.clip(lam_a * ka, LAMBDA_MIN, LAMBDA_MAX))
+    new_h, new_a = h["n_focus"] < NEWCOMER_MATCHES, a["n_focus"] < NEWCOMER_MATCHES
+    lam_h, lam_a = (float(x) for x in apply_newcomer(lam_h, lam_a, new_h, new_a, *t.newcomer))
+    lam_h, lam_a = (float(np.atleast_1d(x)[0]) for x in shrink_totals(comp, lam_h, lam_a, t.total_shrink, t.total_mean))
+    base_h, base_a = base_goals(ratings["gls"].goals_home, ratings["gls"].goals_away, neutral)
     matrix = score_matrix(lam_h, lam_a, t.rho)
     p_poisson = outcome_probs(matrix)
-    features = history_features(pd.DataFrame([snapshot_columns(h, a)]), np.array([lam_h]), np.array([lam_a]))
+    features = history_features(pd.DataFrame([snapshot_columns(h, a)]), np.array([lam_h]), np.array([lam_a]),
+                                p_poisson[None, :])
     p_logistic = predict_hda(t.logistic, features)[0]
     p_final = t.w_poisson * p_poisson + (1 - t.w_poisson) * p_logistic
     over25, btts = goal_markets(reweight_matrix(matrix, p_final))
@@ -798,6 +989,8 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
         trained=t,
         url=url,
         signal_name=data.signal_name,
+        base_home=float(base_h) * kh,
+        base_away=float(base_a) * ka,
     )
 
 

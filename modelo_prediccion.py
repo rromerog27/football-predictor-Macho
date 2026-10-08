@@ -9,6 +9,7 @@ aproximado con tiros de ESPN. Ver el README para la descripción del modelo.
 Uso:
     python3 modelo_prediccion.py "Arsenal" "Leeds" --liga "Premier League"
     python3 modelo_prediccion.py "América" "Monterrey" --liga "Liga MX" --detalle
+    python3 modelo_prediccion.py "Arsenal" "Leeds" --backtest     # + comparación con las cuotas de cierre
     python3 modelo_prediccion.py --listar
 """
 
@@ -17,6 +18,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from src import backtest
 from src import competitions as comps
 from src import match_model as mm
 
@@ -62,7 +64,6 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
     att_a, def_a = pred.attack_defense("away")
     w_recent = h["n_recent"] / (h["n_recent"] + t.shrink)
     signal = pred.signal_short
-    gls = pred.ratings["gls"]
 
     out = [SEP, "🌐 FUENTES DE DATOS LOCALIZADAS EN LA WEB", "- URLs analizadas para el scraping:"]
     for s in data.sources:
@@ -83,12 +84,17 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
         out += detail_lines(pred.home, h) + detail_lines(pred.away, a)
     if pred.low_data:
         out.append(f"- ⚠ Pocos datos: algún equipo tiene menos de {mm.MIN_MATCHES} partidos en los últimos 12 meses.")
+    if pred.newcomers:
+        out.append(f"- Recién llegado a la competición: {', '.join(pred.newcomers)} (se aplica la calibración de "
+                   f"ascendidos: ×{t.newcomer[0]:.2f} a sus goles, ×{t.newcomer[1]:.2f} a los del rival).")
+    decay = f"vida media {mm.DECAY_HALF_LIFE_DAYS:.0f} días" if mm.DECAY_HALF_LIFE_DAYS else "sin decaimiento"
     out += [
-        f"- Fuerza ajustada por rival (1.00 = media; {w_recent:.0%} últimos {mm.N_RECENT} / "
-        f"{1 - w_recent:.0%} últimos 12 meses; {t.signal_weight:.0%} {signal} / {1 - t.signal_weight:.0%} goles):",
+        f"- Fuerza ajustada por rival (1.00 = media; 12 meses ponderados por antigüedad, {decay}; "
+        f"{w_recent:.0%} forma de los últimos {mm.N_RECENT}; {t.signal_weight:.0%} {signal} / "
+        f"{1 - t.signal_weight:.0%} goles):",
         f"    {pred.home}: ataque {att_h:.2f} | defensa {def_h:.2f}"
         f"   ·   {pred.away}: ataque {att_a:.2f} | defensa {def_a:.2f}",
-        f"- Goles medios de la competición (12 meses): local {gls.goals_home:.2f} / visitante {gls.goals_away:.2f}",
+        f"- Goles medios de la competición (12 meses): local {pred.base_home:.2f} / visitante {pred.base_away:.2f}",
         f"- Goles esperados del partido: λ local {pred.lam_home:.2f} | λ visitante {pred.lam_away:.2f}",
         "- Bajas/lesiones: las fuentes no las publican → no incluidas en el modelo (no se infieren).",
         "- Descanso: calculado solo con los partidos de las competiciones descargadas.",
@@ -131,6 +137,26 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
     return "\n".join(out)
 
 
+def backtest_report(result) -> str:
+    r = result
+    lines = [
+        SEP,
+        "📊 BACKTEST CONTRA EL MERCADO (football-data.co.uk, cuotas de cierre)",
+        f"- Partidos: {r.n_matched} de {r.n_val} de validación ({r.period}) · cuotas: {r.odds_source}",
+        f"- Log loss 1X2 -> Modelo {r.ll_model:.4f} (Poisson {r.ll_poisson:.4f}, Logística {r.ll_logistic:.4f}) | "
+        f"Mercado {r.ll_market:.4f} | Frecuencias {r.ll_baseline:.4f}",
+        f"- Distancia al mercado: {r.gap:+.4f} (negativo = el modelo es mejor que el cierre)",
+        f"- Mezcla modelo + mercado: peso del modelo {r.alpha:.0%} → log loss {r.ll_blend_cv:.4f} "
+        "(validación cruzada; si el peso es ~0, el modelo no añade información al mercado)",
+    ]
+    if r.ll_ou_model is not None:
+        lines.append(f"- Over/Under 2.5 ({r.n_ou} partidos): modelo {r.ll_ou_model:.4f} | mercado {r.ll_ou_market:.4f}")
+    roi = " | ".join(f"{row.umbral}: {row.apuestas} apuestas, ROI {row.ROI * 100:+.1f}%" if row.apuestas
+                     else f"{row.umbral}: sin apuestas" for row in r.roi.itertuples())
+    lines += [f"- ROI simulado (1 unidad a la cuota de cierre cuando el modelo supera al mercado): {roi}", SEP]
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Predicción Poisson + regresión logística (xG / tiros / goles).")
     parser.add_argument("local", nargs="?", help="Equipo local (p. ej. 'Arsenal')")
@@ -139,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--refrescar", action="store_true", help="Ignora la caché y vuelve a descargar")
     parser.add_argument("--detalle", action="store_true", help="Muestra los últimos partidos usados de cada equipo")
     parser.add_argument("--listar", action="store_true", help="Lista las ligas y copas disponibles")
+    parser.add_argument("--backtest", action="store_true",
+                        help="Compara el modelo con las cuotas de cierre de football-data.co.uk")
     args = parser.parse_args(argv)
 
     if args.listar:
@@ -165,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     print(report(pred, data, args.detalle))
+    if args.backtest:
+        try:
+            print(backtest_report(backtest.run(model)))
+        except mm.PredictionError as exc:
+            print(f"Backtest no disponible: {exc}", file=sys.stderr)
     return 0
 
 

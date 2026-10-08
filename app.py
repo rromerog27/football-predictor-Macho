@@ -22,7 +22,7 @@ import streamlit as st
 # vieja (y la página fallaría con AttributeError o ImportError). Se recargan, en orden de
 # dependencias, los que cambiaron en disco desde que se cargaron.
 for _name in ("src.fc27_market", "src.fc27_history", "src.fc27_signals", "src.match_model", "src.understat_source",
-              "src.espn_source", "src.competitions", "src.ui_theme"):
+              "src.espn_source", "src.football_data_source", "src.competitions", "src.backtest", "src.ui_theme"):
     _module = sys.modules.get(_name)
     if _module is not None and os.path.getmtime(_module.__file__) > getattr(_module, "_loaded_at", 0):
         importlib.reload(_module)
