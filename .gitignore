@@ -13,3 +13,12 @@ models/*.joblib
 # Historial local del mercado de FC 27 (se genera solo al usar la sección FC 27 Mercado).
 data/fc27_market.sqlite
 data/fc27_snapshot.log
+
+# Caché de descargas de Understat (modelo_prediccion.py; se regenera sola).
+data/understat_cache/
+
+# Caché de descargas de ESPN (src/espn_source.py; se regenera sola).
+data/espn_cache/
+
+# Caché de football-data.co.uk (src/football_data_source.py; se regenera sola).
+data/football_data_cache/
