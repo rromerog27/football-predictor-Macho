@@ -13,6 +13,12 @@ usa internet: descarga datos en vivo de FUT.GG para buscar oportunidades de
 trading en EA SPORTS FC 27 Ultimate Team (ver "Sección FC 27 Mercado" más
 abajo). No comparte datos con el predictor de partidos.
 
+Por separado, el script de terminal **`modelo_prediccion.py`** sí descarga
+datos reales de internet (xG partido a partido de Understat) para predecir
+un partido concreto con un ensemble Poisson + regresión logística (ver
+"Predicción por terminal con datos web" más abajo). Tampoco comparte datos
+con la app.
+
 ## Estado actual: Fase 3 — Exportación (completa)
 
 Implementado hasta ahora:
@@ -113,6 +119,7 @@ football_predictor/
 ├── views/
 │   ├── fc27_mercado.py       # Página Mercado FC 27
 │   └── predictor.py          # Página Predictor de partidos
+├── modelo_prediccion.py      # Predicción por terminal con xG de Understat (Poisson + logística)
 ├── requirements.txt          # Dependencias del proyecto
 ├── README.md                 # Este archivo
 │
@@ -140,7 +147,8 @@ football_predictor/
     ├── test_predictions.py     # Pruebas de feature engineering, regresión logística y combinación
     ├── test_reports.py         # Pruebas de exportación (CSV/Excel/HTML)
     ├── test_market_odds.py     # Pruebas de probabilidad implícita y simulación de apuestas de valor
-    └── test_fc27.py            # Pruebas de la sección FC 27 Mercado (lectura, historial, señales)
+    ├── test_fc27.py            # Pruebas de la sección FC 27 Mercado (lectura, historial, señales)
+    └── test_modelo_prediccion.py # Pruebas sin red del script de predicción con Understat
 ```
 
 ### Para qué sirve cada archivo
@@ -282,6 +290,52 @@ regla de "promo próxima" en las puntuaciones.
 Las señales son heurísticas: el Market Score es un indicador comparativo, no
 una probabilidad de ganar. FUTBIN no se usa porque bloquea las peticiones
 automáticas.
+
+## Predicción por terminal con datos web (`modelo_prediccion.py`)
+
+```bash
+python3 modelo_prediccion.py "Arsenal" "Leeds" --liga "Premier League"
+python3 modelo_prediccion.py "Arsenal" "Leeds" --detalle      # + los 10 partidos usados de cada equipo
+python3 modelo_prediccion.py "Real Madrid" "Barcelona" --liga LaLiga --refrescar
+```
+
+Ligas disponibles (las que cubre Understat): Premier League, LaLiga,
+Bundesliga, Serie A, Ligue 1 y la Liga Premier de Rusia.
+
+**Datos.** Descarga de `https://understat.com/getLeagueData/<liga>/<temporada>`
+el calendario con goles y xG de cada partido de la temporada en curso y de
+las 5 anteriores (la más antigua solo sirve de historial previo). Las
+temporadas cerradas quedan en caché en `data/understat_cache/`; la temporada
+en curso se vuelve a descargar pasadas 3 horas (o con `--refrescar`). Si la
+descarga falla, el script se detiene: nunca rellena con datos inventados.
+Understat no publica lesiones ni sanciones, y el descanso se calcula solo con
+partidos de liga (no ve copas ni competiciones europeas).
+
+**Modelo.**
+
+1. *Fuerza ajustada por rival:* con los partidos de los últimos 12 meses se
+   ajusta el modelo multiplicativo `xG = media_sede · ataque · defensa_rival`
+   (ajuste proporcional iterativo, equivalente a máxima verosimilitud de
+   Poisson sobre el xG).
+2. *Forma reciente:* ataque/defensa de los últimos 10 partidos de cada equipo
+   (xG real / xG esperado según sede y rival), mezclados con la fuerza de 12
+   meses. El peso de la mezcla se elige con datos históricos (máxima
+   verosimilitud de los goles reales en las temporadas de entrenamiento).
+3. *Poisson puro:* `λ = goles medios reales de la liga por sede · ataque ·
+   defensa rival`. El xG fija la fuerza relativa y los goles reales el nivel,
+   porque el xG de Understat va por encima de los goles marcados en las
+   últimas temporadas. De la matriz de marcadores salen el 1X2, el Over/Under
+   2.5, ambos anotan y los marcadores más probables.
+4. *Regresión logística multinomial:* reajusta la señal de Poisson
+   (`log(λ local/λ visitante)`, `log(λ total)`) con la racha de puntos de los
+   últimos 5 partidos, los últimos 5 en casa del local y fuera del visitante
+   (localía) y el descanso en categorías (corto ≤4 días, normal 5-7, largo
+   ≥8). Se entrena con instantáneas pre-partido sin fuga de información y
+   elige su regularización con validación cruzada temporal.
+5. *Ensemble:* el peso Poisson/logística minimiza el log loss sobre la
+   temporada anterior y la actual, que la logística no vio al entrenar. Para
+   Over/Under y ambos anotan, la matriz de Poisson se reescala para que
+   reproduzca el 1X2 final.
 
 ## Formato de archivo esperado
 
