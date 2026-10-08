@@ -38,12 +38,12 @@ st.set_page_config(
 st.markdown(ui_theme.inject_global_css(), unsafe_allow_html=True)
 
 pages = {
-    "FC 27 Ultimate Team": [
-        st.Page("views/fc27_mercado.py", title="Mercado FC 27", icon="📈", url_path="fc27", default=True),
-    ],
     "Fútbol real": [
-        st.Page("views/partidos_del_dia.py", title="Partidos del día", icon="📅", url_path="partidos"),
+        st.Page("views/partidos_del_dia.py", title="Partidos del día", icon="📅", url_path="partidos", default=True),
         st.Page("views/predictor.py", title="Predictor de partidos", icon="⚽", url_path="predictor"),
+    ],
+    "FC 27 Ultimate Team": [
+        st.Page("views/fc27_mercado.py", title="Mercado FC 27", icon="📈", url_path="fc27"),
     ],
 }
 

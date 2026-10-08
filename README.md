@@ -177,8 +177,8 @@ football_predictor/
 
 ## Sección FC 27 Mercado
 
-Página `views/fc27_mercado.py`. Es la página que se abre por defecto al
-ejecutar `streamlit run app.py` ("Mercado FC 27" en el menú lateral).
+Página `views/fc27_mercado.py` ("Mercado FC 27" en el menú lateral). Al
+ejecutar `streamlit run app.py` se abre por defecto "Partidos del día".
 
 Orden de la página: cabecera (mercado en vivo y última actualización),
 **Resumen de hoy** (mejor compra, mayor riesgo y próximo evento, tres tarjetas
@@ -299,8 +299,8 @@ automáticas.
 
 ## Partidos del día y predicción por terminal
 
-La página **Partidos del día** (`streamlit run app.py` → "Fútbol real") tiene
-dos secciones:
+La página **Partidos del día** es la que se abre por defecto al ejecutar
+`streamlit run app.py`. Tiene dos secciones:
 
 - **Partidos del día:** elige la fecha y las ligas; cada partido muestra la
   barra 1X2, Over 2.5, ambos anotan, el marcador más probable y, en "Ver
