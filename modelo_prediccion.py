@@ -4,7 +4,9 @@
 Script de terminal sobre `src/match_model.py` y `src/competitions.py` (el mismo
 modelo que usa la página "Partidos del día" de la app). Usa xG real de
 Understat en las 6 ligas que cubre y, en el resto de ligas y copas, el xG
-aproximado con tiros de ESPN. Ver el README para la descripción del modelo.
+aproximado con tiros de ESPN; donde hay cuotas de cierre de partidos anteriores
+(football-data.co.uk o ESPN), también la fuerza que les da el mercado. Ver el
+README para la descripción del modelo.
 
 Uso:
     python3 modelo_prediccion.py "Arsenal" "Leeds" --liga "Premier League"
@@ -37,6 +39,10 @@ def team_metrics_lines(name: str, role: str, snap: dict, signal: str) -> list[st
     recent = snap["recent_rows"]
     venue_txt = "en casa" if role == "local" else "fuera"
     first, last = recent["datetime"].iloc[0], recent["datetime"].iloc[-1]
+    with_odds = recent[recent["mkt_real"]] if "mkt_real" in recent else recent.iloc[0:0]
+    market = ([f"      Mercado (goles esperados según las cuotas de cierre, {len(with_odds)} de esos partidos): "
+               f"a favor {with_odds['mf'].mean():.2f} | en contra {with_odds['ma'].mean():.2f}"]
+              if len(with_odds) else [])
     return [
         f"    {name} ({role}) — últimos {len(recent)} partidos [{first:%Y-%m-%d} → {last:%Y-%m-%d}]",
         f"      {signal} a favor {recent['sf'].mean():.2f} | en contra {recent['sa'].mean():.2f} | "
@@ -45,6 +51,7 @@ def team_metrics_lines(name: str, role: str, snap: dict, signal: str) -> list[st
         f"= {int(snap['form_rows']['pts'].sum())} pts | Últ. {len(snap['venue_rows'])} {venue_txt}: "
         f"{mm.form_string(snap['venue_rows'])} = {int(snap['venue_rows']['pts'].sum())} pts | "
         f"Descanso: {snap['rest_days']:.0f} días ({mm.rest_category(snap['rest_days'])})",
+        *market,
     ]
 
 
@@ -77,6 +84,13 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
         out.append(f"- Partido: {pred.home} vs {pred.away} | {data.name} | sin partido en el calendario en los "
                    f"próximos {mm.FIXTURE_HORIZON_DAYS} días: se usan los datos disponibles a {pred.cutoff:%Y-%m-%d}")
     out.append(f"- Señal de calidad de ocasiones: {data.signal_name}")
+    if t.market_weight:
+        how = "elegido con datos" if data.market_mode == "learn" else "típico: solo hay cuotas recientes"
+        out.append(f"- Señal de mercado: goles esperados implícitos en las cuotas de cierre de los partidos "
+                   f"anteriores ({data.market_coverage:.0%} de los partidos de los últimos 12 meses; peso "
+                   f"{t.market_weight:.0%}, {how})")
+    else:
+        out.append("- Señal de mercado: sin cuotas de cierre de partidos anteriores suficientes → no se usa")
     out.append("- Métricas extraídas:")
     out += team_metrics_lines(pred.home, "local", h, signal)
     out += team_metrics_lines(pred.away, "visitante", a, signal)
@@ -88,15 +102,17 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
         out.append(f"- Recién llegado a la competición: {', '.join(pred.newcomers)} (se aplica la calibración de "
                    f"ascendidos: ×{t.newcomer[0]:.2f} a sus goles, ×{t.newcomer[1]:.2f} a los del rival).")
     decay = f"vida media {mm.DECAY_HALF_LIFE_DAYS:.0f} días" if mm.DECAY_HALF_LIFE_DAYS else "sin decaimiento"
+    mix = f"{t.signal_weight:.0%} {signal} / {1 - t.signal_weight:.0%} goles"
+    if t.market_weight:
+        mix = f"{t.market_weight:.0%} mercado + {1 - t.market_weight:.0%} ({mix})"
     out += [
         f"- Fuerza ajustada por rival (1.00 = media; 12 meses ponderados por antigüedad, {decay}; "
-        f"{w_recent:.0%} forma de los últimos {mm.N_RECENT}; {t.signal_weight:.0%} {signal} / "
-        f"{1 - t.signal_weight:.0%} goles):",
+        f"{w_recent:.0%} forma de los últimos {mm.N_RECENT}; {mix}):",
         f"    {pred.home}: ataque {att_h:.2f} | defensa {def_h:.2f}"
         f"   ·   {pred.away}: ataque {att_a:.2f} | defensa {def_a:.2f}",
         f"- Goles medios de la competición (12 meses): local {pred.base_home:.2f} / visitante {pred.base_away:.2f}",
         f"- Goles esperados del partido: λ local {pred.lam_home:.2f} | λ visitante {pred.lam_away:.2f}",
-        "- Bajas/lesiones: las fuentes no las publican → no incluidas en el modelo (no se infieren).",
+        "- Bajas/lesiones del partido: no incluidas (solo de forma indirecta, vía las cuotas de partidos anteriores).",
         "- Descanso: calculado solo con los partidos de las competiciones descargadas.",
         SEP,
         "🧮 RESULTADOS DE LOS MODELOS (POISSON & LOGÍSTICO)",
@@ -141,7 +157,7 @@ def backtest_report(result) -> str:
     r = result
     lines = [
         SEP,
-        "📊 BACKTEST CONTRA EL MERCADO (football-data.co.uk, cuotas de cierre)",
+        "📊 BACKTEST CONTRA EL MERCADO (cuotas de cierre)",
         f"- Partidos: {r.n_matched} de {r.n_val} de validación ({r.period}) · cuotas: {r.odds_source}",
         f"- Log loss 1X2 -> Modelo {r.ll_model:.4f} (Poisson {r.ll_poisson:.4f}, Logística {r.ll_logistic:.4f}) | "
         f"Mercado {r.ll_market:.4f} | Frecuencias {r.ll_baseline:.4f}",
@@ -166,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--detalle", action="store_true", help="Muestra los últimos partidos usados de cada equipo")
     parser.add_argument("--listar", action="store_true", help="Lista las ligas y copas disponibles")
     parser.add_argument("--backtest", action="store_true",
-                        help="Compara el modelo con las cuotas de cierre de football-data.co.uk")
+                        help="Compara el modelo con las cuotas de cierre (football-data.co.uk o ESPN)")
     args = parser.parse_args(argv)
 
     if args.listar:

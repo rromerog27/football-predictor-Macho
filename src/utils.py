@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+from pathlib import Path
 from typing import Any
 
 # Semilla global para reproducibilidad (usada por scikit-learn en Fase 2).
@@ -22,6 +25,15 @@ INSUFFICIENT_DATA_LABEL = "Datos insuficientes"
 # consistente por poisson_model.py y prediction_model.py, para que sus
 # métricas de validación (log loss, matriz de confusión) sean comparables.
 CLASS_LABELS = ["A", "D", "H"]
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Escribe un archivo de caché de una vez (temporal + rename): con varias competiciones
+    cargándose en paralelo, nadie lee un archivo a medio escribir."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
 
 def get_logger(name: str) -> logging.Logger:

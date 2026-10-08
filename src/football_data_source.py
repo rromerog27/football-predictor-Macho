@@ -1,4 +1,4 @@
-"""Fuente football-data.co.uk: resultados con cuotas de cierre (para el backtest).
+"""Fuente football-data.co.uk: resultados con cuotas de cierre (señal de mercado y backtest).
 
 - Ligas principales: `https://football-data.co.uk/mmz4281/<aaaa>/<div>.csv`
   (una temporada por archivo; p. ej. `2526/E0.csv` = Premier League 2025/26).
@@ -21,7 +21,8 @@ import numpy as np
 import pandas as pd
 import requests
 
-from src.match_model import PredictionError
+from src.match_model import PredictionError, SourceInfo
+from src.utils import write_atomic
 
 FOOTBALL_DATA = "https://football-data.co.uk"
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) football-predictor-macho"}
@@ -32,9 +33,10 @@ CURRENT_CACHE_TTL_S = 6 * 3600
 MAIN_DIVISIONS = {
     "eng.1": "E0", "eng.2": "E1", "esp.1": "SP1", "esp.2": "SP2", "ger.1": "D1", "ger.2": "D2",
     "ita.1": "I1", "ita.2": "I2", "fra.1": "F1", "fra.2": "F2", "ned.1": "N1", "por.1": "P1",
-    "bel.1": "B1", "tur.1": "T1", "sco.1": "SC0",
+    "bel.1": "B1", "tur.1": "T1", "sco.1": "SC0", "eng.3": "E2", "sco.2": "SC1", "gre.1": "G1",
 }
-EXTRA_LEAGUES = {"mex.1": "MEX", "arg.1": "ARG", "bra.1": "BRA", "usa.1": "USA", "jpn.1": "JPN", "rus.1": "RUS"}
+EXTRA_LEAGUES = {"mex.1": "MEX", "arg.1": "ARG", "bra.1": "BRA", "usa.1": "USA", "jpn.1": "JPN", "rus.1": "RUS",
+                 "aut.1": "AUT", "den.1": "DNK", "nor.1": "NOR", "swe.1": "SWE"}
 
 # Columnas de cuotas por orden de preferencia: (nombre, local, empate, visitante).
 ODDS_1X2 = [("Pinnacle (cierre)", "PSCH", "PSCD", "PSCA"), ("media del mercado (cierre)", "AvgCH", "AvgCD", "AvgCA"),
@@ -51,8 +53,10 @@ def _season_code(season: int) -> str:
     return f"{season % 100:02d}{(season + 1) % 100:02d}"
 
 
-def _download(url: str, cache_file: Path, permanent: bool) -> pd.DataFrame | None:
-    if cache_file.exists() and (permanent or time.time() - cache_file.stat().st_mtime < CURRENT_CACHE_TTL_S):
+def _download(url: str, cache_file: Path, permanent: bool) -> tuple[pd.DataFrame | None, bool]:
+    """(archivo, si salió de la caché); (None, False) si no existe."""
+    from_cache = cache_file.exists() and (permanent or time.time() - cache_file.stat().st_mtime < CURRENT_CACHE_TTL_S)
+    if from_cache:
         text = cache_file.read_text(encoding="utf-8")
     else:
         last_error: Exception | None = None
@@ -60,7 +64,7 @@ def _download(url: str, cache_file: Path, permanent: bool) -> pd.DataFrame | Non
             try:
                 resp = requests.get(url, headers=HTTP_HEADERS, timeout=60)
                 if resp.status_code == 404:
-                    return None
+                    return None, False
                 resp.raise_for_status()
                 text = resp.content.decode("utf-8-sig", errors="replace")
                 break
@@ -69,9 +73,8 @@ def _download(url: str, cache_file: Path, permanent: bool) -> pd.DataFrame | Non
                 time.sleep(2**attempt)
         else:
             raise PredictionError(f"No se pudo descargar {url}: {last_error}")
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(text, encoding="utf-8")
-    return pd.read_csv(io.StringIO(text), on_bad_lines="skip")
+        write_atomic(cache_file, text)
+    return pd.read_csv(io.StringIO(text), on_bad_lines="skip"), from_cache
 
 
 def _pick_odds(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
@@ -117,29 +120,40 @@ def _standardize(df: pd.DataFrame, home: str, away: str, hg: str, ag: str) -> pd
     }).dropna(subset=["date", "hg", "ag"])
 
 
-def load(code: str, start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.DataFrame, list[str]]:
-    """Partidos con cuotas de cierre entre `start` y `end` (fechas). Devuelve (partidos, URLs)."""
+def load_with_sources(code: str, start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.DataFrame, list[SourceInfo]]:
+    """Partidos con cuotas de cierre entre `start` y `end` (fechas) y los archivos usados
+    (con los partidos con cuotas de cada uno en ese periodo)."""
     now = pd.Timestamp.now()
     current_season = now.year if now.month >= 7 else now.year - 1
-    frames, urls = [], []
+    files = []  # (url, archivo de caché, sin caducidad, etiqueta, columnas local/visitante/goles)
     if code in MAIN_DIVISIONS:
         div = MAIN_DIVISIONS[code]
         for season in range(start.year - 1, min(end.year, current_season) + 1):
-            url = f"{FOOTBALL_DATA}/mmz4281/{_season_code(season)}/{div}.csv"
-            raw = _download(url, CACHE_DIR / f"{div}_{_season_code(season)}.csv", season < current_season)
-            if raw is not None and len(raw):
-                frames.append(_standardize(raw, "HomeTeam", "AwayTeam", "FTHG", "FTAG"))
-                urls.append(url)
+            files.append((f"{FOOTBALL_DATA}/mmz4281/{_season_code(season)}/{div}.csv",
+                          CACHE_DIR / f"{div}_{_season_code(season)}.csv", season < current_season,
+                          f"{season}/{(season + 1) % 100:02d}", ("HomeTeam", "AwayTeam", "FTHG", "FTAG")))
     elif code in EXTRA_LEAGUES:
-        url = f"{FOOTBALL_DATA}/new/{EXTRA_LEAGUES[code]}.csv"
-        raw = _download(url, CACHE_DIR / f"extra_{EXTRA_LEAGUES[code]}.csv", False)
-        if raw is not None and len(raw):
-            frames.append(_standardize(raw, "Home", "Away", "HG", "AG"))
-            urls.append(url)
+        files.append((f"{FOOTBALL_DATA}/new/{EXTRA_LEAGUES[code]}.csv", CACHE_DIR / f"extra_{EXTRA_LEAGUES[code]}.csv",
+                      False, "todas las temporadas", ("Home", "Away", "HG", "AG")))
     else:
         raise PredictionError(f"football-data.co.uk no tiene cuotas de {code}.")
+    lo, hi = start.normalize() - pd.Timedelta(days=1), end.normalize() + pd.Timedelta(days=1)
+    frames, sources = [], []
+    for url, cache_file, permanent, label, cols in files:
+        raw, from_cache = _download(url, cache_file, permanent)
+        if raw is None or not len(raw):
+            continue
+        df = _standardize(raw, *cols)
+        df = df[(df["date"] >= lo) & (df["date"] <= hi)]
+        if len(df):
+            frames.append(df)
+            sources.append(SourceInfo(url, f"cuotas de cierre {label}", int(df["odds_h"].notna().sum()), from_cache))
     if not frames:
         raise PredictionError(f"football-data.co.uk no devolvió partidos de {code}.")
-    df = pd.concat(frames, ignore_index=True)
-    window = (df["date"] >= start.normalize() - pd.Timedelta(days=1)) & (df["date"] <= end.normalize() + pd.Timedelta(days=1))
-    return df[window].reset_index(drop=True), urls
+    return pd.concat(frames, ignore_index=True), sources
+
+
+def load(code: str, start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.DataFrame, list[str]]:
+    """Partidos con cuotas de cierre entre `start` y `end` (fechas). Devuelve (partidos, URLs)."""
+    df, sources = load_with_sources(code, start, end)
+    return df, [s.url for s in sources]

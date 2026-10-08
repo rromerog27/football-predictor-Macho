@@ -114,6 +114,14 @@ def test_espn_event_parsing_with_shots_and_odds():
     assert (row["odds_over25"], row["odds_under25"]) == pytest.approx((1 + 100 / 120, 2.0))
 
 
+def test_espn_zero_shots_for_both_teams_means_no_statistics():
+    event = _espn_event()
+    for c in event["competitions"][0]["competitors"]:
+        c["statistics"] = [{"name": "totalShots", "displayValue": "0"}, {"name": "shotsOnTarget", "displayValue": "0"}]
+    row = espn_source.events_frame([espn_source.trim_event(event)], "arg.2").iloc[0]
+    assert row["played"] and np.isnan(row["h_sig"]) and np.isnan(row["a_sig"])  # el modelo usará los goles
+
+
 def test_espn_drops_postponed_and_marks_extra_time():
     assert espn_source.trim_event(_espn_event(status="STATUS_POSTPONED", completed=False)) is None
     aet = espn_source.events_frame([espn_source.trim_event(_espn_event(status="STATUS_FINAL_AET"))], "x")
@@ -458,3 +466,132 @@ def test_backtest_run_with_synthetic_odds(trained_league, monkeypatch):
     assert r.n_matched == r.n_val == len(preds)
     assert r.ll_market == pytest.approx(r.ll_model, abs=1e-9)  # mismas probabilidades una vez quitado el margen
     assert 0.0 <= r.alpha <= 1.0 and len(r.roi) == len(backtest.ROI_THRESHOLDS)
+
+
+# --------------------------------------------------------------------------
+# Señal de mercado (cuotas de cierre de partidos anteriores)
+# --------------------------------------------------------------------------
+
+
+def test_implied_goals_recovers_lambdas_from_1x2_and_over_under():
+    from src import market_signal as ms
+    lam_h, lam_a = np.array([1.9, 1.1, 0.7, 2.6]), np.array([0.8, 1.2, 1.9, 0.5])
+    line = np.array([2.5, 2.5, 3.5, 1.5])
+    p_h, p_a, p_over = ms._model_probs(lam_h, lam_a, line)
+    got_h, got_a = ms.implied_goals(p_h, p_a, p_over, 2.7, line)
+    np.testing.assert_allclose(got_h, lam_h, rtol=1e-3)
+    np.testing.assert_allclose(got_a, lam_a, rtol=1e-3)
+    # Sin Over/Under el reparto local/visitante sigue saliendo del 1X2.
+    only_h, only_a = ms.implied_goals(p_h, p_a, np.full(4, np.nan), 2.7, line)
+    np.testing.assert_allclose(np.log(only_h / only_a), np.log(lam_h / lam_a), atol=0.2)
+
+
+def test_map_teams_by_results_ignores_names():
+    from src import market_signal as ms
+    rng = np.random.default_rng(3)
+    ours_names = ["Manchester United", "Wolverhampton Wanderers", "Nottingham Forest", "Atletico Madrid"]
+    theirs_names = {"Manchester United": "Man United", "Wolverhampton Wanderers": "Wolves",
+                    "Nottingham Forest": "Nott'm Forest", "Atletico Madrid": "Ath Madrid"}
+    rows = []
+    for k in range(24):
+        h, a = rng.choice(ours_names, 2, replace=False)
+        rows.append({"date": pd.Timestamp("2025-08-01") + pd.Timedelta(days=7 * k), "home": h, "away": a,
+                     "hg": float(rng.integers(0, 4)), "ag": float(rng.integers(0, 4))})
+    ours = pd.DataFrame(rows)
+    theirs = ours.assign(home=ours["home"].map(theirs_names), away=ours["away"].map(theirs_names),
+                         date=ours["date"] + pd.Timedelta(days=1))
+    assert ms.map_teams(ours, theirs) == {v: k for k, v in theirs_names.items()}
+
+
+def _with_market(data: mm.LeagueData, since: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Partidos de la liga sintética con los λ "verdaderos" como señal de mercado (desde `since`)."""
+    m = data.matches.copy()
+    s = {f"Team{i}": 1.6 - 0.1 * i for i in range(12)}
+    played = m["played"] & ((m["datetime"] >= since) if since is not None else True)
+    m["h_mkt"] = np.where(played, 1.5 * m["home"].map(s) / m["away"].map(s), np.nan)
+    m["a_mkt"] = np.where(played, 1.2 * m["away"].map(s) / m["home"].map(s), np.nan)
+    return m
+
+
+def test_market_signal_is_learned_when_history_has_odds():
+    data = _fake_league()
+    with_mkt = mm.build_league_data(data.competition, data.name, _with_market(data), data.sources, "xG",
+                                    data.training_since)
+    assert with_mkt.market_mode == "learn" and with_mkt.index.has_market
+    t = mm.train_league(with_mkt).trained
+    assert t.market_weight in mm.MARKET_WEIGHT_GRID and t.market_weight >= 0.5  # λ exactos: el mercado manda
+    assert mm.train_league(data).trained.market_weight == 0.0
+
+
+def test_market_signal_with_recent_odds_only_uses_fixed_weight():
+    data = _fake_league()
+    last = data.matches["datetime"].max()
+    recent_only = _with_market(data, since=last - pd.Timedelta(days=200))
+    fixed = mm.build_league_data(data.competition, data.name, recent_only, data.sources, "xG", data.training_since)
+    assert fixed.market_mode == "fixed"
+    model = mm.train_league(fixed)
+    assert model.trained.market_weight == mm.MARKET_WEIGHT_DEFAULT
+    pred = mm.predict_match(model, "Team0", "Team11", cutoff=last + pd.Timedelta(days=1))
+    assert pred.home_snap["mkt_share"] >= 0.8 and pred.lam_home > pred.lam_away
+
+
+def test_market_weight_scales_with_recent_odds_share():
+    snap = {"n_recent": 10, "mkt_share": 0.0}
+    for kind, value in (("sig", 1.3), ("gls", 1.1), ("mkt", 2.0)):
+        snap[f"att_recent_{kind}"] = snap[f"att_long_{kind}"] = value
+    without = mm.strength(snap, 5.0, 0.5, "att")
+    assert mm.strength(snap, 5.0, 0.5, "att", market_weight=0.8) == pytest.approx(without)
+    snap["mkt_share"] = 1.0
+    assert mm.strength(snap, 5.0, 0.5, "att", market_weight=1.0) == pytest.approx(2.0)
+
+
+def test_espn_past_odds_parsing_and_cache(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, event_id):
+            self.event_id = event_id
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            if self.event_id == "2":
+                return {"pickcenter": []}
+            return {"pickcenter": [{"provider": {"name": "DraftKings"}, "overUnder": 3.5, "overOdds": 150.0,
+                                    "underOdds": -200.0, "homeTeamOdds": {"moneyLine": -150},
+                                    "awayTeamOdds": {"moneyLine": 400}, "drawOdds": {"moneyLine": 280.0}}]}
+
+    class FakeSession:
+        def get(self, url, params=None, headers=None, timeout=None):
+            calls.append(params["event"])
+            return FakeResponse(params["event"])
+
+    monkeypatch.setattr(espn_source, "CACHE_DIR", tmp_path)
+    odds, from_cache = espn_source.fetch_past_odds("col.1", ["1", "2"], FakeSession())
+    assert not from_cache and odds["2"] is None
+    assert odds["1"]["home"] == pytest.approx(1 + 100 / 150) and odds["1"]["away"] == pytest.approx(5.0)
+    assert odds["1"]["line"] == 3.5 and odds["1"]["under"] == pytest.approx(1.5)
+    again, from_cache = espn_source.fetch_past_odds("col.1", ["1", "2"], FakeSession())
+    assert from_cache and again == odds and sorted(calls) == ["1", "2"]  # la segunda vez, de la caché
+
+
+def test_backtest_uses_espn_odds_where_football_data_has_none(trained_league, monkeypatch):
+    from src import backtest
+    preds = trained_league.trained.val_predictions
+    p = preds[[f"p_ensemble_{c}" for c in mm.CLASSES]].to_numpy()
+    odds = {str(i).removeprefix("espn:"): {"home": 1 / (r[0] * 1.05), "draw": 1 / (r[1] * 1.05),
+                                           "away": 1 / (r[2] * 1.05), "line": 2.5, "over": 1.9, "under": 1.9}
+            for i, r in zip("espn:" + preds["id"].astype(str), p)}
+    model = mm.LeagueModel(trained_league.data, trained_league.trained)
+    model.trained.val_predictions = preds.assign(id="espn:" + preds["id"].astype(str), competition="col.1")
+    model.data.competition = "col.1"
+    try:
+        monkeypatch.setattr(backtest.espn_source, "fetch_past_odds",
+                            lambda code, ids: ({i: odds.get(i) for i in ids}, True))
+        r = backtest.run(model)
+    finally:
+        model.trained.val_predictions = preds
+        model.data.competition = "eng.1"
+    assert r.odds_source == "DraftKings (ESPN)" and r.n_matched == len(preds)
+    assert r.ll_market == pytest.approx(r.ll_model, abs=1e-9)
