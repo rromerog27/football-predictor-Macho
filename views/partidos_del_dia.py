@@ -1,34 +1,41 @@
-"""Partidos del día — predicciones automáticas con xG de Understat.
+"""Partidos del día — predicciones automáticas para ~33 ligas y copas.
 
-Página registrada en `app.py`. Lista los partidos de la fecha elegida (en la
-zona horaria del navegador) de las ligas que cubre Understat y muestra para
-cada uno la predicción del ensemble Poisson + regresión logística de
-`src/understat_model.py`. La sección "Analizar un partido" corre el mismo
-modelo para cualquier cruce de una liga.
+Página registrada en `app.py` (página de inicio). Lista los partidos de la
+fecha elegida (en la zona horaria del navegador) de las competiciones
+elegidas y muestra para cada uno la predicción del ensemble Poisson
+(Dixon-Coles) + regresión logística de `src/match_model.py`, con las
+probabilidades del mercado cuando ESPN publica cuotas. La sección "Analizar
+un partido" corre el mismo modelo para cualquier cruce de una competición.
 
-Cada liga se entrena una sola vez y queda en caché unas horas (la primera
-visita tarda unos segundos por liga); predecir un partido es instantáneo.
-Este archivo solo presenta los datos: el modelo vive en `src/understat_model.py`.
+Cada competición se entrena una sola vez y queda en caché unas horas (la
+primera visita tarda unos segundos por competición con partidos ese día);
+predecir un partido es instantáneo. Este archivo solo presenta los datos: el
+modelo vive en `src/match_model.py` y las fuentes en `src/competitions.py`.
 """
 
 from __future__ import annotations
 
 import html
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 import pandas as pd
 import requests
 import streamlit as st
 
-from src import understat_model as um
+from src import competitions as comps
+from src import match_model as mm
 
-MODEL_TTL_S = um.CURRENT_SEASON_CACHE_TTL_S  # el modelo se reentrena cuando caduca la temporada en caché
-FIXTURES_TTL_S = 30 * 60
+MODEL_TTL_S = 3 * 3600  # igual que la caché del año/temporada en curso: el modelo ve los resultados nuevos
+DAY_TTL_S = 10 * 60
+# Diferencia modelo − mercado que se señala: la media es ~5 puntos por resultado; 10 o más
+# aparece en ~1 de cada 10 partidos (medido en una jornada de 39 partidos con cuotas).
+VALUE_THRESHOLD = 0.10
 TIMEZONES = [
     "Europe/Madrid", "Europe/London", "America/Mexico_City", "America/Bogota", "America/Lima",
     "America/Santiago", "America/Argentina/Buenos_Aires", "America/New_York", "UTC",
 ]
-OUTCOME_NAMES = ("Local", "Empate", "Visitante")
+ORDERED_CODES = [c.code for region in comps.REGIONS for c in comps.COMPETITIONS if c.region == region]
 
 PAGE_CSS = """
 <style>
@@ -112,9 +119,17 @@ PAGE_CSS = """
 .pd-form .E { background: var(--fc-surface-2); color: var(--fc-muted); }
 .pd-form .P { background: var(--fc-red-soft); color: var(--fc-red-ink); }
 .pd-detail a { color: var(--fc-blue); font-weight: 600; text-decoration: none; }
+
+/* Mercado: probabilidades sin margen de las cuotas y la mayor diferencia con el modelo. */
+.pd-mkt { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: .76rem; color: var(--fc-muted);
+  font-variant-numeric: tabular-nums; margin: -2px 0 12px; }
+.pd-mkt b { color: var(--fc-text); font-weight: 700; }
+.pd-mkt .pd-label { margin-right: 2px; }
+.pd-pill.val { background: var(--fc-yellow-soft); color: var(--fc-yellow-ink);
+  border-color: color-mix(in srgb, var(--fc-yellow) 30%, transparent); margin-left: auto; }
+.pd-warn { font-size: .74rem; color: var(--fc-yellow-ink); margin: -4px 0 10px; }
 </style>
 """
-
 st.markdown(PAGE_CSS, unsafe_allow_html=True)
 
 
@@ -123,28 +138,50 @@ st.markdown(PAGE_CSS, unsafe_allow_html=True)
 # ---------------------------------------------------------------------------
 
 
-@st.cache_data(ttl=FIXTURES_TTL_S, show_spinner=False)
-def _season_matches(league: str) -> pd.DataFrame:
-    """Calendario de la temporada en curso (una descarga ligera por liga)."""
-    season = um.current_season_for(um.utc_now())
-    dates, _ = um.fetch_season(requests.Session(), league, season, season)
-    return um.matches_frame({season: dates})
-
-
-@st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False)
-def _league_model(league: str) -> um.LeagueModel:
-    """Descarga las temporadas de la liga y entrena Poisson + logística (lo caro: una vez cada pocas horas)."""
-    return um.train_league(um.load_league(league))
-
-
-def _model_or_error(league: str) -> um.LeagueModel | None:
-    with st.spinner(f"Preparando el modelo de {um.league_name(league)} (la primera vez tarda unos segundos)…"):
+@st.cache_data(ttl=DAY_TTL_S, show_spinner=False)
+def _day_listing(codes: tuple[str, ...], start: pd.Timestamp, end: pd.Timestamp
+                 ) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    """Partidos de cada competición en [start, end) según ESPN, descargados en paralelo."""
+    def job(code: str):
         try:
-            return _league_model(league)
-        except um.PredictionError as exc:
-            st.warning(f"{um.league_name(league)}: {exc}")
-        except Exception as exc:  # noqa: BLE001 — una liga caída no debe tumbar la página
-            st.warning(f"{um.league_name(league)}: no se pudo preparar el modelo ({exc}).")
+            return code, comps.day_fixtures(comps.BY_CODE[code], start, end, requests.Session()), None
+        except mm.PredictionError as exc:
+            return code, None, str(exc)
+
+    with ThreadPoolExecutor(comps.MAX_WORKERS) as pool:
+        results = list(pool.map(job, codes))
+    return ({c: f for c, f, _ in results if f is not None and len(f)},
+            {c: e for c, _, e in results if e})
+
+
+@st.cache_data(ttl=DAY_TTL_S, show_spinner=False)
+def _next_kickoff(codes: tuple[str, ...], after: pd.Timestamp) -> pd.Timestamp | None:
+    def job(code: str):
+        try:
+            return comps.next_kickoff(comps.BY_CODE[code], after, requests.Session())
+        except mm.PredictionError:
+            return None
+
+    with ThreadPoolExecutor(comps.MAX_WORKERS) as pool:
+        times = [t for t in pool.map(job, codes) if t is not None]
+    return min(times) if times else None
+
+
+@st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
+def _competition_model(code: str) -> mm.LeagueModel:
+    """Descarga los datos de la competición y entrena Poisson + logística (lo caro: una vez cada pocas horas)."""
+    return mm.train_league(comps.load_competition(comps.BY_CODE[code]))
+
+
+def _model_or_error(code: str) -> mm.LeagueModel | None:
+    name = comps.BY_CODE[code].name
+    with st.spinner(f"Preparando el modelo de {name} (la primera vez tarda unos segundos)…"):
+        try:
+            return _competition_model(code)
+        except mm.PredictionError as exc:
+            st.warning(f"{name}: {exc}")
+        except Exception as exc:  # noqa: BLE001 — una competición caída no debe tumbar la página
+            st.warning(f"{name}: no se pudo preparar el modelo ({exc}).")
     return None
 
 
@@ -179,11 +216,11 @@ def _esc(text: str) -> str:
 
 
 def _form_html(rows: pd.DataFrame) -> str:
-    letters = um.form_string(rows).split()
+    letters = mm.form_string(rows).split()
     return "<span class='pd-form'>" + "".join(f"<i class='{c}'>{c}</i>" for c in letters) + "</span>"
 
 
-def _pick_pill(pred: um.MatchPrediction) -> str:
+def _pick_pill(pred: mm.MatchPrediction) -> str:
     """Pronóstico (resultado más probable) y, si el partido ya se jugó, si acertó."""
     best = int(pred.p_final.argmax())
     pick = ("1 · " + pred.home, "X · Empate", "2 · " + pred.away)[best]
@@ -198,7 +235,7 @@ def _pick_pill(pred: um.MatchPrediction) -> str:
     return f"<span class='pd-pill miss' title='Pronóstico: {_esc(pick)}'>✗ Falló</span>"
 
 
-def _bar_html(pred: um.MatchPrediction) -> str:
+def _bar_html(pred: mm.MatchPrediction) -> str:
     names = (pred.home, "Empate", pred.away)
     colors = ("var(--pd-home)", "var(--pd-draw)", "var(--pd-away)")
     label = ", ".join(f"{n} {p * 100:.1f}%" for n, p in zip(names, pred.p_final))
@@ -214,15 +251,37 @@ def _bar_html(pred: um.MatchPrediction) -> str:
             f"<div class='pd-legend'>{legend}</div>")
 
 
-def _card_summary_html(pred: um.MatchPrediction, tz: str, show_date: bool = False) -> str:
+def _market_html(pred: mm.MatchPrediction) -> str:
+    """Probabilidades del mercado y, si el modelo da VALUE_THRESHOLD o más a algún resultado, cuál."""
+    if not pred.market:
+        return ""
+    pm = pred.market["p_1x2"]
+    diff = pred.p_final - pm
+    best = int(diff.argmax())
+    chip = ""
+    if diff[best] >= VALUE_THRESHOLD:
+        key = ("1", "X", "2")[best]
+        chip = (f"<span class='pd-pill val' title='El modelo da {diff[best] * 100:.1f} puntos más que el mercado "
+                f"a este resultado. No es una recomendación de apuesta.'>{key} +{diff[best] * 100:.0f} vs mercado</span>")
+    probs = "".join(f"<span>{k} <b>{_pct(p)}</b></span>" for k, p in zip(("1", "X", "2"), pm))
+    return (f"<div class='pd-mkt' title='Cuotas de DraftKings vía ESPN, sin el margen de la casa "
+            f"({pred.market['margin'] * 100:.1f}%)'><span class='pd-label'>Mercado</span>{probs}{chip}</div>")
+
+
+def _card_summary_html(pred: mm.MatchPrediction, tz: str, show_date: bool = False) -> str:
     if pred.kickoff is None:
         when = f"Datos al {_local(pred.cutoff, tz):%d/%m}"
     else:
         when = _local(pred.kickoff, tz).strftime("%d/%m %H:%M" if show_date else "%H:%M")
-    when = f"{when} · {um.league_name(pred.league)}"
+    when = f"{when} · {comps.BY_CODE[pred.competition].name}" + (" · neutral" if pred.neutral else "")
     middle = (f"<div class='pd-score'>{pred.final_score[0]} - {pred.final_score[1]}</div>"
               if pred.final_score else "<div class='pd-vs'>vs</div>")
     i, j, p = pred.top_scores[0]
+    warn = ""
+    if pred.low_data:
+        few = min(pred.home_snap["n_window"], pred.away_snap["n_window"])
+        warn = (f"<div class='pd-warn' title='Partidos de los últimos 12 meses en los datos descargados'>"
+                f"⚠ Pocos datos de algún equipo ({few} partidos): tómalo con cautela.</div>")
     return (
         f"<div class='pd-top'><span class='pd-time'>{_esc(when)}</span>{_pick_pill(pred)}</div>"
         "<div class='pd-teams'>"
@@ -239,13 +298,15 @@ def _card_summary_html(pred: um.MatchPrediction, tz: str, show_date: bool = Fals
         f"<div class='pd-market' title='Marcador exacto más probable ({p * 100:.1f}%)'>"
         f"<span>Marcador</span><b>{i}-{j}</b></div>"
         "</div>"
+        f"{_market_html(pred)}{warn}"
     )
 
 
-def _detail_html(pred: um.MatchPrediction) -> str:
+def _detail_html(pred: mm.MatchPrediction) -> str:
     t, h, a = pred.trained, pred.home_snap, pred.away_snap
     att_h, def_h = pred.attack_defense("home")
     att_a, def_a = pred.attack_defense("away")
+    signal = pred.signal_short
 
     def row(name: str, probs) -> str:
         return f"<tr><td>{name}</td>" + "".join(f"<td>{p * 100:.1f}%</td>" for p in probs) + "</tr>"
@@ -255,32 +316,36 @@ def _detail_html(pred: um.MatchPrediction) -> str:
         return (f"<div class='pd-ts'><div class='pd-ts-head'><b>{_esc(name)}</b>{_form_html(snap['form_rows'])}</div>"
                 f"<div class='pd-ts-meta'><span title='Puntos en los últimos 5 partidos {venue}'>"
                 f"{int(snap['venue_rows']['pts'].sum())} pts {venue}</span>"
-                f"<span title='xG a favor / en contra, media de los últimos {len(recent)} partidos'>"
-                f"xG {recent['xgf'].mean():.2f} / {recent['xga'].mean():.2f}</span>"
-                f"<span title='Ataque / defensa ajustados por rival (1.00 = media de la liga)'>"
+                f"<span title='{signal} a favor / en contra, media de los últimos {len(recent)} partidos'>"
+                f"{signal} {recent['sf'].mean():.2f} / {recent['sa'].mean():.2f}</span>"
+                f"<span title='Ataque / defensa ajustados por rival (1.00 = media)'>"
                 f"Atq {att:.2f} · Def {dfn:.2f}</span>"
-                f"<span title='Días desde su último partido de liga'>{snap['rest_days']:.0f} d de descanso</span>"
+                f"<span title='Días desde su último partido en los datos descargados'>"
+                f"{snap['rest_days']:.0f} d de descanso</span>"
                 "</div></div>")
 
+    market_row = row("Mercado", pred.market["p_1x2"]) if pred.market else ""
     scores = " · ".join(f"{i}-{j} ({p * 100:.1f}%)" for i, j, p in pred.top_scores)
-    link = (f"<a href='{pred.understat_url}' target='_blank' rel='noopener'>Ver en Understat ↗</a>"
-            if pred.understat_url else "")
+    over_market = (f" · mercado {pred.market['over25'] * 100:.1f}%"
+                   if pred.market and pred.market["over25"] is not None else "")
+    url = comps.match_url(pred.match_id)
+    link = f"<a href='{url}' target='_blank' rel='noopener'>Ver partido ↗</a>" if url else ""
     return (
         "<div class='pd-detail'>"
         "<table><tr><th>Modelo</th><th>1</th><th>X</th><th>2</th></tr>"
-        f"{row('Poisson', pred.p_poisson)}{row('Logística', pred.p_logistic)}"
-        f"{row(f'Ensemble ({t.w_poisson:.0%}/{1 - t.w_poisson:.0%})', pred.p_final)}</table>"
+        f"{row('Poisson (DC)', pred.p_poisson)}{row('Logística', pred.p_logistic)}"
+        f"{row(f'Ensemble ({t.w_poisson:.0%}/{1 - t.w_poisson:.0%})', pred.p_final)}{market_row}</table>"
         f"{team_block(pred.home, h, att_h, def_h, 'en casa')}"
         f"{team_block(pred.away, a, att_a, def_a, 'fuera')}"
         f"<div><b>Marcadores más probables:</b> {scores}</div>"
-        f"<div><b>Poisson puro:</b> Over 2.5 {pred.over25_poisson * 100:.1f}% · "
-        f"Ambos anotan {pred.btts_poisson * 100:.1f}%</div>"
+        f"<div><b>Over 2.5:</b> modelo {pred.over25 * 100:.1f}% (Poisson {pred.over25_poisson * 100:.1f}%)"
+        f"{over_market} · <b>Ambos anotan:</b> {pred.btts * 100:.1f}%</div>"
         f"<div style='margin-top:6px'>{link}</div>"
         "</div>"
     )
 
 
-def _match_card(pred: um.MatchPrediction, tz: str, key: str, show_date: bool = False,
+def _match_card(pred: mm.MatchPrediction, tz: str, key: str, show_date: bool = False,
                 with_detail: bool = True) -> None:
     with st.container(key=f"pd_card_{key}"):
         st.markdown(_card_summary_html(pred, tz, show_date), unsafe_allow_html=True)
@@ -289,7 +354,11 @@ def _match_card(pred: um.MatchPrediction, tz: str, key: str, show_date: bool = F
                 st.markdown(_detail_html(pred), unsafe_allow_html=True)
 
 
-def _recent_table(snap: dict) -> pd.DataFrame:
+def _safe_key(text: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in str(text))
+
+
+def _recent_table(snap: dict, signal: str) -> pd.DataFrame:
     rows = snap["recent_rows"].iloc[::-1]
     return pd.DataFrame(
         {
@@ -297,15 +366,40 @@ def _recent_table(snap: dict) -> pd.DataFrame:
             "Sede": rows["venue"].map({"h": "Local", "a": "Visitante"}),
             "Rival": rows["opp"],
             "Resultado": [f"{int(g)}-{int(c)}" for g, c in zip(rows["gf"], rows["ga"])],
-            "xG F": rows["xgf"].round(2),
-            "xG C": rows["xga"].round(2),
+            f"{signal} F": rows["sf"].round(2),
+            f"{signal} C": rows["sa"].round(2),
         }
     )
+
+
+def _validation_table(models: dict[str, mm.LeagueModel]) -> pd.DataFrame:
+    rows = []
+    for code, m in models.items():
+        t = m.trained
+        rows.append({
+            "Competición": comps.BY_CODE[code].name,
+            "Señal": m.data.signal_name,
+            "Peso señal": f"{t.signal_weight:.0%}",
+            "ρ (Dixon-Coles)": round(t.rho, 3),
+            "Log loss referencia": round(t.ll_baseline, 3),
+            "Log loss modelo": round(t.ll_ensemble, 3),
+            "Mejora": round(t.ll_baseline - t.ll_ensemble, 3),
+            "Partidos": t.n_val,
+        })
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
 # Secciones
 # ---------------------------------------------------------------------------
+
+
+def _date_from_url() -> date | None:
+    """Fecha inicial desde `?fecha=AAAA-MM-DD` (enlaces a un día concreto)."""
+    try:
+        return pd.Timestamp(st.query_params["fecha"]).date()
+    except (KeyError, ValueError):
+        return None
 
 
 def _jump_to(day: date) -> None:
@@ -314,132 +408,147 @@ def _jump_to(day: date) -> None:
 
 def section_today(tz: str) -> None:
     if "pd_date" not in st.session_state:  # el botón "próxima fecha" la cambia vía session_state
-        st.session_state["pd_date"] = pd.Timestamp.now(tz=tz).date()
+        st.session_state["pd_date"] = _date_from_url() or pd.Timestamp.now(tz=tz).date()
+    for region in comps.REGIONS:  # selección por defecto (vía session_state, sin `default` en el widget)
+        st.session_state.setdefault(f"pd_codes_{region}", [c for c in comps.DEFAULT_CODES
+                                                          if comps.BY_CODE[c].region == region])
+    chosen = sum(len(st.session_state[f"pd_codes_{r}"]) for r in comps.REGIONS)
     with st.container(key="pd_controls"):
-        day = st.date_input("Fecha", key="pd_date", format="DD/MM/YYYY", width=220)
-        leagues = st.pills("Ligas", options=list(um.LEAGUES), format_func=um.league_name,
-                           selection_mode="multi", default=list(um.LEAGUES), key="pd_leagues")
-    if not leagues:
-        st.markdown("<div class='pd-empty'>Elige al menos una liga.</div>", unsafe_allow_html=True)
+        c1, c2 = st.columns([1, 1.6], vertical_alignment="bottom")
+        with c1:
+            day = st.date_input("Fecha", key="pd_date", format="DD/MM/YYYY")
+        with c2:
+            with st.popover(f"Ligas y copas · {chosen} elegidas", icon=":material/tune:", width="stretch"):
+                for region in comps.REGIONS:
+                    st.pills(region, [c.code for c in comps.COMPETITIONS if c.region == region],
+                             format_func=lambda c: comps.BY_CODE[c].name, selection_mode="multi",
+                             key=f"pd_codes_{region}")
+    codes = [c for r in comps.REGIONS for c in st.session_state[f"pd_codes_{r}"]]
+    if not codes:
+        st.markdown("<div class='pd-empty'>Elige al menos una liga o copa.</div>", unsafe_allow_html=True)
         return
 
     start, end = _day_bounds_utc(day, tz)
-    fixtures: dict[str, pd.DataFrame] = {}
-    for league in leagues:
-        try:
-            matches = _season_matches(league)
-        except um.PredictionError as exc:
-            st.warning(f"{um.league_name(league)}: {exc}")
-            continue
-        day_matches = matches[(matches["datetime"] >= start) & (matches["datetime"] < end)]
-        if len(day_matches):
-            fixtures[league] = day_matches
+    selected = tuple(c for c in ORDERED_CODES if c in codes)
+    with st.spinner("Buscando los partidos del día…"):
+        fixtures, errors = _day_listing(selected, start, end)
+    for code, err in errors.items():
+        st.warning(f"{comps.BY_CODE[code].name}: {err}")
 
     if not fixtures:
-        upcoming = []
-        for league in leagues:
-            try:
-                m = _season_matches(league)
-            except um.PredictionError:
-                continue
-            nxt = m[m["datetime"] >= end]
-            if len(nxt):
-                upcoming.append(_local(nxt["datetime"].iloc[0], tz).date())
-        st.markdown(f"<div class='pd-empty'>No hay partidos el {day:%d/%m/%Y} en las ligas elegidas.</div>",
+        st.markdown(f"<div class='pd-empty'>No hay partidos el {day:%d/%m/%Y} en las competiciones elegidas.</div>",
                     unsafe_allow_html=True)
-        if upcoming:
-            nxt_day = min(upcoming)
+        nxt = _next_kickoff(selected, end)
+        if nxt is not None:
+            nxt_day = _local(nxt, tz).date()
             st.button(f"Ir a la próxima fecha con partidos: {nxt_day:%d/%m/%Y}", on_click=_jump_to,
                       args=(nxt_day,), icon=":material/event:")
         return
 
-    models = {league: m for league in fixtures if (m := _model_or_error(league)) is not None}
+    total = sum(len(f) for f in fixtures.values())
+    n_comp = f"{len(fixtures)} " + ("competición" if len(fixtures) == 1 else "competiciones")
+    st.markdown(f"<div class='pd-note'>{total} partido{'' if total == 1 else 's'} en {n_comp} · horas en {_esc(tz)} · "
+                "predicción con los datos anteriores a cada partido.</div>", unsafe_allow_html=True)
+
+    models: dict[str, mm.LeagueModel] = {}
+    progress = st.progress(0.0, text="Preparando modelos…") if len(fixtures) > 1 else None
+    for n, code in enumerate(fixtures, start=1):
+        if progress:
+            progress.progress(n / len(fixtures), text=f"Modelo de {comps.BY_CODE[code].name} ({n}/{len(fixtures)})…")
+        model = _model_or_error(code)
+        if model is not None:
+            models[code] = model
+    if progress:
+        progress.empty()
     if not models:
         return
-    day_matches = pd.concat([fixtures[league].assign(league=league) for league in models])
-    day_matches = day_matches.sort_values(["datetime", "league", "home"])
-    st.markdown(f"<div class='pd-note'>{len(day_matches)} partidos · horas en {_esc(tz)} · predicción con los "
-                "datos anteriores a cada partido.</div>", unsafe_allow_html=True)
+
+    day_rows = []
+    for code, model in models.items():
+        rows = comps.fixture_rows_for_model(comps.BY_CODE[code], model.data, fixtures[code])
+        day_rows.append(rows.assign(_code=code))
+    day_matches = pd.concat(day_rows, ignore_index=True)
+    day_matches["_order"] = day_matches["_code"].map(ORDERED_CODES.index)
+    day_matches = day_matches.sort_values(["datetime", "_order", "home"])
 
     with st.container(key="pd_grid"):
         for fixture in day_matches.to_dict("records"):
             row = pd.Series(fixture)
+            code = row["_code"]
             try:
-                pred = um.predict_match(models[row["league"]], row["home"], row["away"], fixture=row)
-            except um.PredictionError as exc:
-                with st.container(key=f"pd_card_{row['id']}"):
+                pred = mm.predict_match(models[code], row["home"], row["away"], fixture=row)
+            except mm.PredictionError as exc:
+                with st.container(key=f"pd_card_{_safe_key(row['id'])}"):
                     st.markdown(f"<div class='pd-top'><span class='pd-time'>{_local(row['datetime'], tz):%H:%M}"
-                                f" · {_esc(um.league_name(row['league']))}</span></div>"
+                                f" · {_esc(comps.BY_CODE[code].name)}</span></div>"
                                 f"<b>{_esc(row['home'])} vs {_esc(row['away'])}</b>"
                                 f"<div class='pd-note'>{_esc(exc)}</div>", unsafe_allow_html=True)
                 continue
-            _match_card(pred, tz, key=str(row["id"]))
+            _match_card(pred, tz, key=_safe_key(row["id"]))
 
     with st.expander("Cómo funciona y limitaciones"):
         st.markdown(
-            "- **Datos:** xG partido a partido de [Understat](https://understat.com) (temporada en curso y 5 "
-            "anteriores). Solo cubre Premier League, LaLiga, Bundesliga, Serie A, Ligue 1 y la liga rusa.\n"
-            "- **Poisson:** fuerza de ataque/defensa ajustada por rival (xG de 12 meses, mezclado con los "
-            "últimos 10 partidos) → goles esperados λ → matriz de marcadores.\n"
+            "- **Datos:** xG partido a partido de [Understat](https://understat.com) en Premier League, LaLiga, "
+            "Bundesliga, Serie A, Ligue 1 y la liga rusa. En el resto, resultados y tiros de ESPN con un **xG "
+            "aproximado** (0.23 por tiro a puerta + 0.065 por tiro fuera, calibrado con el xG de Understat); en "
+            "Uruguay y Paraguay, sin tiros publicados, solo goles.\n"
+            "- **Copas internacionales:** se modelan junto con las ligas de sus participantes, para que la fuerza "
+            "de equipos de países distintos sea comparable.\n"
+            "- **Poisson (Dixon-Coles):** fuerza de ataque/defensa ajustada por rival (12 meses, mezclada con los "
+            "últimos 10 partidos y entre señal y goles con pesos elegidos con datos) → goles esperados λ → matriz "
+            "de marcadores, con la corrección de Dixon-Coles para los marcadores bajos.\n"
             "- **Regresión logística:** reajusta la señal de Poisson con la racha de puntos, la localía y el "
-            "descanso.\n"
-            "- **Ensemble:** el peso de cada modelo minimiza el log loss en las dos últimas temporadas.\n"
-            "- **No incluye** lesiones, sanciones ni alineaciones; el descanso solo cuenta partidos de liga.\n"
-            "- En partidos ya jugados, el pronóstico usa los datos previos al partido, pero la regresión "
-            "logística se entrenó con toda la temporada: tómalo como referencia, no como un backtest.\n"
-            "- El modelo de cada liga se reentrena cada 3 horas con los resultados nuevos."
+            "descanso. **Ensemble:** el peso de cada modelo minimiza el log loss en el 30% más reciente.\n"
+            "- **Mercado:** probabilidades de las cuotas de DraftKings (vía ESPN) sin el margen de la casa. La "
+            "etiqueta amarilla marca el resultado al que el modelo da 10 o más puntos más que el mercado; **no es "
+            "una recomendación de apuesta**: el mercado suele ser más preciso que cualquier modelo público.\n"
+            "- **No incluye** lesiones, sanciones ni alineaciones; el descanso solo cuenta los partidos de las "
+            "competiciones descargadas.\n"
+            "- En partidos ya jugados, la regresión logística se entrenó con toda la temporada: el "
+            "\"acertó/falló\" es orientativo, no un backtest.\n"
+            "- Cada modelo se reentrena cada 3 horas con los resultados nuevos."
         )
-        st.markdown("**Validación de cada liga** (log loss 1X2 en las dos últimas temporadas; menor es mejor, "
-                    "1.099 equivale a repartir 33/33/33):")
-        st.dataframe(
-            pd.DataFrame(
-                {
-                    "Liga": [um.league_name(league) for league in models],
-                    "Peso Poisson": [f"{m.trained.w_poisson:.0%}" for m in models.values()],
-                    "Log loss Poisson": [round(m.trained.ll_poisson, 3) for m in models.values()],
-                    "Log loss logística": [round(m.trained.ll_logistic, 3) for m in models.values()],
-                    "Log loss ensemble": [round(m.trained.ll_ensemble, 3) for m in models.values()],
-                    "Partidos": [m.trained.n_val for m in models.values()],
-                }
-            ),
-            hide_index=True, width="stretch",
-        )
+        st.markdown("**Validación de los modelos de hoy** (log loss 1X2 en el 30% más reciente del histórico; "
+                    "menor es mejor; la referencia es predecir siempre las frecuencias de 1/X/2):")
+        st.dataframe(_validation_table(models), hide_index=True, width="stretch")
 
 
 def section_manual(tz: str) -> None:
     with st.container(key="pd_manual_form"):
-        league = st.selectbox("Liga", options=list(um.LEAGUES), format_func=um.league_name, key="pd_m_league")
-        try:
-            matches = _season_matches(league)
-        except um.PredictionError as exc:
-            st.warning(str(exc))
+        code = st.selectbox("Liga o copa", ORDERED_CODES, key="pd_m_code",
+                            format_func=lambda c: f"{comps.BY_CODE[c].name} · {comps.BY_CODE[c].region}")
+        model = _model_or_error(code)
+        if model is None:
             return
-        teams = sorted(set(matches["home"]) | set(matches["away"]))
+        teams = model.data.teams
         c1, c2 = st.columns(2)
         with c1:
-            home = st.selectbox("Local", teams, index=0, key=f"pd_m_home_{league}")
+            home = st.selectbox("Local", teams, index=0, key=f"pd_m_home_{code}")
         with c2:
-            away = st.selectbox("Visitante", teams, index=min(1, len(teams) - 1), key=f"pd_m_away_{league}")
+            away = st.selectbox("Visitante", teams, index=min(1, len(teams) - 1), key=f"pd_m_away_{code}")
         run = st.button("Correr modelo", type="primary", icon=":material/play_arrow:", width="stretch",
                         disabled=home == away)
         if home == away:
             st.caption("Elige dos equipos distintos.")
     if run:
-        st.session_state["pd_manual"] = (league, home, away)
+        st.session_state["pd_manual"] = (code, home, away)
 
     request = st.session_state.get("pd_manual")
-    if not request:
-        st.markdown("<div class='pd-note'>Si el partido está en el calendario se usa su fecha; si no, todos los "
-                    "datos disponibles hasta hoy.</div>", unsafe_allow_html=True)
+    if not request or request[0] != code:
+        st.markdown(f"<div class='pd-note'>Si el partido está en el calendario de los próximos "
+                    f"{mm.FIXTURE_HORIZON_DAYS} días se usa su fecha (y sus cuotas); si no, todos los datos "
+                    "disponibles hasta hoy.</div>", unsafe_allow_html=True)
         return
 
-    league, home, away = request
-    model = _model_or_error(league)
-    if model is None:
-        return
+    code, home, away = request
+    comp = comps.BY_CODE[code]
     try:
-        pred = um.predict_match(model, home, away)
-    except um.PredictionError as exc:
+        pred = mm.predict_match(model, home, away)
+        if comp.understat and pred.match_id is not None:  # cuotas de ESPN para el partido de Understat
+            fixture = comps.understat_fixture_with_odds(comp, model.data, pred.match_id)
+            if fixture is not None:
+                pred = mm.predict_match(model, pred.home, pred.away, fixture=fixture)
+    except mm.PredictionError as exc:
         st.warning(str(exc))
         return
 
@@ -448,12 +557,13 @@ def section_manual(tz: str) -> None:
         _match_card(pred, tz, key="manual", show_date=True, with_detail=False)
     with right:
         st.markdown(_detail_html(pred), unsafe_allow_html=True)
+    signal = pred.signal_short
     c1, c2 = st.columns(2)
     for col, name, snap in ((c1, pred.home, pred.home_snap), (c2, pred.away, pred.away_snap)):
         with col:
-            st.markdown(f"<div class='pd-label'>{_esc(name)} · últimos {snap['n_recent']} partidos de liga</div>",
+            st.markdown(f"<div class='pd-label'>{_esc(name)} · últimos {snap['n_recent']} partidos</div>",
                         unsafe_allow_html=True)
-            st.dataframe(_recent_table(snap), hide_index=True, width="stretch")
+            st.dataframe(_recent_table(snap, signal), hide_index=True, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +576,8 @@ default_tz = browser_tz if browser_tz else "UTC"
 
 st.markdown(
     "<div class='pd-head'><div class='pd-title'>Partidos <span>del día</span></div>"
-    "<div class='pd-sub'>Predicciones Poisson + regresión logística con el xG real de Understat.</div></div>",
+    f"<div class='pd-sub'>Predicciones Poisson + regresión logística para {len(comps.COMPETITIONS)} ligas y copas: "
+    "xG real (Understat) o xG aproximado con tiros (ESPN), comparadas con el mercado.</div></div>",
     unsafe_allow_html=True)
 
 with st.sidebar:

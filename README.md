@@ -13,10 +13,11 @@ usa internet: descarga datos en vivo de FUT.GG para buscar oportunidades de
 trading en EA SPORTS FC 27 Ultimate Team (ver "Sección FC 27 Mercado" más
 abajo). No comparte datos con el predictor de partidos.
 
-La página **Partidos del día** también usa internet: descarga de Understat el
-xG partido a partido y muestra, para los partidos de la fecha elegida, la
-predicción de un ensemble Poisson + regresión logística; también permite
-correr el modelo para cualquier cruce de una liga. El mismo modelo se puede
+La página **Partidos del día** también usa internet: descarga resultados y
+xG (Understat) o tiros y cuotas (ESPN) de 33 ligas y copas y muestra, para
+los partidos de la fecha elegida, la predicción de un ensemble Poisson
+(Dixon-Coles) + regresión logística comparada con el mercado; también
+permite correr el modelo para cualquier cruce de una competición. El mismo modelo se puede
 usar desde la terminal con **`modelo_prediccion.py`** (ver "Partidos del día
 y predicción por terminal" más abajo). No comparte datos con el predictor de
 archivos.
@@ -120,7 +121,7 @@ football_predictor/
 ├── app.py                    # Punto de entrada: configuración y navegación entre páginas
 ├── views/
 │   ├── fc27_mercado.py       # Página Mercado FC 27
-│   ├── partidos_del_dia.py   # Página Partidos del día (predicciones con xG de Understat)
+│   ├── partidos_del_dia.py   # Página Partidos del día (predicciones de 33 ligas y copas)
 │   └── predictor.py          # Página Predictor de partidos
 ├── modelo_prediccion.py      # Predicción por terminal con xG de Understat (Poisson + logística)
 ├── requirements.txt          # Dependencias del proyecto
@@ -141,7 +142,10 @@ football_predictor/
 │   ├── prediction_model.py     # Regresión logística de respaldo + predicción combinada
 │   ├── report_generator.py     # Exportación a CSV, Excel y HTML
 │   ├── market_odds.py          # Comparación contra cuotas de mercado + simulación de value bets
-│   ├── understat_model.py      # Descarga de Understat + modelo Poisson/logística (Partidos del día y terminal)
+│   ├── match_model.py          # Modelo Poisson (Dixon-Coles) + logística, independiente de la fuente
+│   ├── competitions.py         # Registro de ligas y copas, carga de datos, calendario y cuotas del día
+│   ├── understat_source.py     # Descarga de Understat (xG)
+│   ├── espn_source.py          # Descarga de ESPN (resultados, tiros, calendario, cuotas)
 │   ├── visualizations.py       # Construcción de gráficos Plotly
 │   └── utils.py                 # Utilidades comunes (safe_divide, logging, formateo)
 │
@@ -152,7 +156,7 @@ football_predictor/
     ├── test_reports.py         # Pruebas de exportación (CSV/Excel/HTML)
     ├── test_market_odds.py     # Pruebas de probabilidad implícita y simulación de apuestas de valor
     ├── test_fc27.py            # Pruebas de la sección FC 27 Mercado (lectura, historial, señales)
-    └── test_modelo_prediccion.py # Pruebas sin red del script de predicción con Understat
+    └── test_modelo_prediccion.py # Pruebas sin red del modelo, sus fuentes (Understat, ESPN) y el script
 ```
 
 ### Para qué sirve cada archivo
@@ -170,8 +174,11 @@ football_predictor/
 | `src/prediction_model.py` | Entrena y calibra la regresión logística de respaldo, calcula sus métricas de validación, y combina sus probabilidades con las de Poisson ponderando por desempeño de validación (log loss). |
 | `src/report_generator.py` | Exporta a CSV/Excel/HTML lo que ya calcularon los demás módulos: tabla de estadísticas, predicción de un partido, comparación de equipos, matriz de marcadores y el reporte HTML completo. |
 | `src/market_odds.py` | Convierte cuotas 1X2 a probabilidad implícita (quitando el margen de la casa), evalúa qué tan bien predice el mercado los partidos de prueba, y simula en retrospectiva una estrategia de apuestas de valor comparando el modelo contra el mercado. |
-| `views/partidos_del_dia.py` | Página Partidos del día: lista los partidos de la fecha (en la zona horaria del navegador) con la predicción de cada uno, y la sección "Analizar un partido". Solo presenta: el modelo vive en `src/understat_model.py`. |
-| `src/understat_model.py` | Descarga el xG de Understat (con caché en disco), calcula la fuerza ajustada por rival, entrena Poisson + regresión logística por liga y predice partidos. Lo usan la página Partidos del día y `modelo_prediccion.py`. |
+| `views/partidos_del_dia.py` | Página Partidos del día: lista los partidos de la fecha (en la zona horaria del navegador) con la predicción y el mercado de cada uno, y la sección "Analizar un partido". Solo presenta: el modelo vive en `src/match_model.py`. |
+| `src/match_model.py` | Modelo independiente de la fuente: fuerza ajustada por rival (señal y goles), Poisson con Dixon-Coles, regresión logística, ensemble, validación y predicción de un partido (con las probabilidades del mercado si hay cuotas). |
+| `src/competitions.py` | Registro de las 33 ligas y copas (fuente, región, pool de ligas de las copas), carga de sus datos, partidos del día y cruce de cuotas de ESPN con los partidos de Understat. |
+| `src/understat_source.py` | Descarga y caché del xG de Understat, convertido a las columnas estándar del modelo. |
+| `src/espn_source.py` | Descarga y caché del marcador de ESPN (resultados, tiros, calendario, campo neutral, cuotas de DraftKings) y cálculo del xG aproximado con tiros. |
 | `src/visualizations.py` | Construye los gráficos Plotly (barras, radar, evolución de forma, mapas de calor, importancia de variables) a partir de datos ya calculados. |
 | `src/utils.py` | Funciones auxiliares compartidas: división segura, formateo de porcentajes/métricas, logging, semilla aleatoria y umbrales de suficiencia de datos. |
 
@@ -300,67 +307,105 @@ automáticas.
 ## Partidos del día y predicción por terminal
 
 La página **Partidos del día** es la que se abre por defecto al ejecutar
-`streamlit run app.py`. Tiene dos secciones:
+`streamlit run app.py`. Cubre **33 ligas y copas** (Europa, América, copas
+internacionales y Japón). Tiene dos secciones:
 
-- **Partidos del día:** elige la fecha y las ligas; cada partido muestra la
-  barra 1X2, Over 2.5, ambos anotan, el marcador más probable y, en "Ver
-  análisis", Poisson vs. logística, la racha y el xG de cada equipo. En
-  partidos ya jugados muestra el resultado y si el pronóstico acertó. Si no
-  hay partidos ese día, ofrece saltar a la próxima fecha con partidos.
-- **Analizar un partido:** elige liga, local y visitante y pulsa "Correr
-  modelo". Si el partido está en el calendario de los próximos 14 días se
-  usa su fecha; si no, los datos disponibles hasta hoy.
+- **Partidos del día:** elige la fecha y, en "Ligas y copas", las
+  competiciones (por defecto 15: las 5 grandes, Portugal, Países Bajos, Liga
+  MX, Argentina, Brasil, MLS, Champions, Europa League, Libertadores y
+  Sudamericana). Cada partido muestra la barra 1X2, Over 2.5, ambos anotan,
+  el marcador más probable y, si ESPN publica cuotas, las probabilidades del
+  mercado. Una etiqueta amarilla marca el resultado al que el modelo da 10 o
+  más puntos más que el mercado (≈1 de cada 10 partidos); no es una
+  recomendación de apuesta. "Ver análisis" muestra Poisson, logística,
+  ensemble y mercado, la racha y la señal de cada equipo. En partidos ya
+  jugados muestra el resultado y si el pronóstico acertó. Si no hay partidos
+  ese día, ofrece saltar a la próxima fecha con partidos. `?fecha=AAAA-MM-DD`
+  en la URL abre la página en ese día.
+- **Analizar un partido:** elige liga o copa, local y visitante y pulsa
+  "Correr modelo". Si el partido está en el calendario de los próximos 14
+  días se usan su fecha y sus cuotas; si no, los datos disponibles hasta hoy.
 
-Cada liga se entrena una vez y queda en caché 3 horas (la primera visita
-tarda unos segundos por liga); predecir cada partido es instantáneo. Las
-horas y el "día" usan la zona horaria del navegador (se puede cambiar en la
-barra lateral).
+Cada competición se entrena una vez y queda en caché 3 horas (3-8 s por
+competición la primera vez); predecir cada partido es instantáneo. Las horas
+y el "día" usan la zona horaria del navegador (se puede cambiar en la barra
+lateral).
 
 Desde la terminal:
 
 ```bash
 python3 modelo_prediccion.py "Arsenal" "Leeds" --liga "Premier League"
-python3 modelo_prediccion.py "Arsenal" "Leeds" --detalle      # + los 10 partidos usados de cada equipo
-python3 modelo_prediccion.py "Real Madrid" "Barcelona" --liga LaLiga --refrescar
+python3 modelo_prediccion.py "América" "Monterrey" --liga "Liga MX" --detalle   # + los 10 partidos de cada equipo
+python3 modelo_prediccion.py "Real Madrid" "Bayern Munich" --liga Champions --refrescar
+python3 modelo_prediccion.py --listar                                            # ligas y copas disponibles
 ```
 
-Ligas disponibles (las que cubre Understat): Premier League, LaLiga,
-Bundesliga, Serie A, Ligue 1 y la Liga Premier de Rusia.
+**Datos** (`src/competitions.py`, `src/understat_source.py`, `src/espn_source.py`).
 
-**Datos.** Descarga de `https://understat.com/getLeagueData/<liga>/<temporada>`
-el calendario con goles y xG de cada partido de la temporada en curso y de
-las 5 anteriores (la más antigua solo sirve de historial previo). Las
-temporadas cerradas quedan en caché en `data/understat_cache/`; la temporada
-en curso se vuelve a descargar pasadas 3 horas (o con `--refrescar`). Si la
-descarga falla, el script se detiene: nunca rellena con datos inventados.
-Understat no publica lesiones ni sanciones, y el descanso se calcula solo con
-partidos de liga (no ve copas ni competiciones europeas).
+- **Understat** (xG real): Premier League, LaLiga, Bundesliga, Serie A,
+  Ligue 1 y liga rusa. `https://understat.com/getLeagueData/<liga>/<temporada>`,
+  temporada en curso y 5 anteriores.
+- **ESPN** (resto de ligas y copas): el marcador público
+  `https://site.api.espn.com/apis/site/v2/sports/soccer/<slug>/scoreboard`
+  da por año natural los resultados con **tiros y tiros a puerta**, el
+  calendario, el campo neutral y, en partidos por jugar, las **cuotas de
+  DraftKings** (1X2 y Over/Under 2.5). Sin xG, la señal es un **xG
+  aproximado** = 0.2295 · tiros a puerta + 0.0647 · tiros fuera, calibrado
+  con una regresión del xG de Understat sobre los tiros de ESPN en 5.838
+  partidos-equipo de las 5 grandes ligas (correlación con el xG real 0.73,
+  frente a 0.61 de los goles). Uruguay y Paraguay no tienen tiros en ESPN:
+  allí la señal son los goles. ESPN también da el calendario del día y las
+  cuotas de las ligas de Understat (cruzadas por hora y nombre de equipo).
+- **Copas internacionales** (Champions, Europa League, Conference League,
+  Libertadores, Sudamericana, Concacaf Champions Cup): se modelan junto con
+  las ligas de sus participantes (20 ligas UEFA, 10 CONMEBOL, 5 CONCACAF),
+  así la fuerza de cada equipo sale sobre todo de su liga y los cruces entre
+  países calibran unas ligas frente a otras.
+- Caché en `data/understat_cache/` y `data/espn_cache/`: lo pasado no
+  caduca; la temporada o el año en curso, a las 3 horas (o con
+  `--refrescar`). Si una descarga falla, el script se detiene y la página lo
+  avisa: nunca se rellenan datos inventados. Ninguna fuente publica lesiones
+  ni alineaciones.
 
-**Modelo.**
+**Modelo** (`src/match_model.py`).
 
-1. *Fuerza ajustada por rival:* con los partidos de los últimos 12 meses se
-   ajusta el modelo multiplicativo `xG = media_sede · ataque · defensa_rival`
-   (ajuste proporcional iterativo, equivalente a máxima verosimilitud de
-   Poisson sobre el xG).
-2. *Forma reciente:* ataque/defensa de los últimos 10 partidos de cada equipo
-   (xG real / xG esperado según sede y rival), mezclados con la fuerza de 12
-   meses. El peso de la mezcla se elige con datos históricos (máxima
-   verosimilitud de los goles reales en las temporadas de entrenamiento).
-3. *Poisson puro:* `λ = goles medios reales de la liga por sede · ataque ·
-   defensa rival`. El xG fija la fuerza relativa y los goles reales el nivel,
-   porque el xG de Understat va por encima de los goles marcados en las
-   últimas temporadas. De la matriz de marcadores salen el 1X2, el Over/Under
-   2.5, ambos anotan y los marcadores más probables.
+1. *Fuerza ajustada por rival:* para cada señal (xG o xG aproximado, y
+   goles) se ajusta con los partidos de los 12 meses anteriores al día del
+   partido el modelo multiplicativo `señal = media_sede · ataque ·
+   defensa_rival` (ajuste proporcional iterativo, equivalente a máxima
+   verosimilitud de Poisson), con un suavizado de 2 partidos "de media de la
+   liga" por equipo que evita fuerzas extremas o nulas con pocos partidos.
+2. *Forma reciente y mezcla de señales:* ataque/defensa de los últimos 10
+   partidos (señal real / esperada según sede y rival) mezclados con la
+   fuerza de 12 meses, y la fuerza por señal mezclada con la fuerza por
+   goles. Ambos pesos se eligen con datos (máxima verosimilitud de los goles
+   reales en el periodo de entrenamiento).
+3. *Poisson con Dixon-Coles:* `λ = goles medios reales de la competición por
+   sede · ataque · defensa rival` (en campo neutral, la media de ambas
+   sedes). La corrección de Dixon-Coles ajusta los marcadores bajos (0-0,
+   1-0, 0-1, 1-1) con un ρ estimado por máxima verosimilitud. De la matriz
+   de marcadores salen el 1X2, el Over/Under 2.5, ambos anotan y los
+   marcadores más probables.
 4. *Regresión logística multinomial:* reajusta la señal de Poisson
    (`log(λ local/λ visitante)`, `log(λ total)`) con la racha de puntos de los
    últimos 5 partidos, los últimos 5 en casa del local y fuera del visitante
    (localía) y el descanso en categorías (corto ≤4 días, normal 5-7, largo
    ≥8). Se entrena con instantáneas pre-partido sin fuga de información y
    elige su regularización con validación cruzada temporal.
-5. *Ensemble:* el peso Poisson/logística minimiza el log loss sobre la
-   temporada anterior y la actual, que la logística no vio al entrenar. Para
+5. *Ensemble:* el peso Poisson/logística minimiza el log loss en el 30% más
+   reciente del histórico, que la logística no vio al entrenar. Para
    Over/Under y ambos anotan, la matriz de Poisson se reescala para que
    reproduzca el 1X2 final.
+
+**Validación** (log loss 1X2 en el 30% más reciente; la referencia es
+predecir siempre las frecuencias de 1/X/2 del entrenamiento): las 33
+competiciones mejoran la referencia, de +0.013 (Uruguay, solo goles) a
++0.159 (Primeira Liga). Ejemplos: Premier League 1.029 (referencia 1.091),
+LaLiga 0.974 (1.052), Bundesliga 0.976 (1.077), Liga MX 1.028 (1.057),
+Brasileirão 0.998 (1.038), Champions (con su pool) 1.006 (1.069). Frente a la
+versión anterior, la mezcla xG/goles, el suavizado y Dixon-Coles bajaron el
+log loss de la Premier League de 1.041 a 1.029. La página muestra la tabla de
+validación de los modelos del día en "Cómo funciona y limitaciones".
 
 ## Formato de archivo esperado
 

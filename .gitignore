@@ -16,3 +16,6 @@ data/fc27_snapshot.log
 
 # Caché de descargas de Understat (modelo_prediccion.py; se regenera sola).
 data/understat_cache/
+
+# Caché de descargas de ESPN (src/espn_source.py; se regenera sola).
+data/espn_cache/
