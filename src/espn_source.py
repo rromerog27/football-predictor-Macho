@@ -21,7 +21,9 @@ año en curso, a las 3 horas.
 from __future__ import annotations
 
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +31,7 @@ import pandas as pd
 import requests
 
 from src.match_model import PredictionError, SourceInfo
+from src.utils import write_atomic
 
 ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) football-predictor-macho"}
@@ -37,6 +40,8 @@ CURRENT_YEAR_CACHE_TTL_S = 3 * 3600
 XG_PER_SHOT_ON_TARGET = 0.2295
 XG_PER_SHOT_OFF_TARGET = 0.0647
 EXTRA_TIME_STATUSES = {"STATUS_FINAL_AET", "STATUS_FINAL_PEN"}
+_ODDS_LOCKS: dict[str, threading.Lock] = {}  # una descarga de cuotas pasadas por competición a la vez
+_ODDS_LOCKS_GUARD = threading.Lock()
 DROPPED_STATUS_WORDS = ("POSTPONED", "CANCELED", "CANCELLED", "ABANDONED", "SUSPENDED", "FORFEIT")
 
 
@@ -161,8 +166,7 @@ def fetch_year(session: requests.Session, slug: str, year: int, current_year: in
         raw = [e for month in range(1, 13)
                for e in _get_events(session, slug, {"dates": f"{year}{month:02d}", "limit": 1000})]
     events = [t for e in raw if (t := trim_event(e)) is not None]
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(json.dumps(events), encoding="utf-8")
+    write_atomic(cache_file, json.dumps(events))
     return events, SourceInfo(url, str(year), sum(e["completed"] for e in events), False)
 
 
@@ -176,6 +180,72 @@ def fetch_current(session: requests.Session, slug: str) -> list[dict]:
     return [t for e in _get_events(session, slug, {}) if (t := trim_event(e)) is not None]
 
 
+def _summary_odds(session: requests.Session, slug: str, event_id: str) -> dict | None:
+    """Cuotas previas (DraftKings) de un partido según su ficha de ESPN: 1X2 y la línea de
+    Over/Under que ofrecía (2.5, 3.5...). None si no tiene; lanza si la petición falla."""
+    url = f"{ESPN}/{slug}/summary"
+    for attempt in range(3):
+        try:
+            resp = session.get(url, params={"event": event_id}, headers=HTTP_HEADERS, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except (requests.RequestException, ValueError):
+            if attempt == 2:
+                raise
+            time.sleep(2**attempt)
+    picks = [p for p in data.get("pickcenter") or [] if p]
+    if not picks:
+        return None
+    o = picks[0]
+    odds = {
+        "home": american_to_decimal((o.get("homeTeamOdds") or {}).get("moneyLine")),
+        "draw": american_to_decimal((o.get("drawOdds") or {}).get("moneyLine")),
+        "away": american_to_decimal((o.get("awayTeamOdds") or {}).get("moneyLine")),
+        "line": o.get("overUnder"),
+        "over": american_to_decimal(o.get("overOdds")),
+        "under": american_to_decimal(o.get("underOdds")),
+    }
+    if not all(np.isfinite(odds[k]) and odds[k] > 1 for k in ("home", "draw", "away")):
+        return None
+    return {k: (None if isinstance(v, float) and not np.isfinite(v) else v) for k, v in odds.items()}
+
+
+def fetch_past_odds(slug: str, event_ids: list[str], session: requests.Session | None = None
+                    ) -> tuple[dict[str, dict | None], bool]:
+    """Cuotas previas de partidos ya jugados (ids de ESPN sin prefijo) y si todas salieron de la
+    caché. ESPN las guarda en la ficha de cada partido desde finales de 2025: una petición por
+    partido, con caché en disco sin caducidad (los partidos jugados no cambian). Las peticiones
+    que fallan se reintentan en la siguiente carga."""
+    cache_file = CACHE_DIR / f"odds_{slug}.json"
+    with _ODDS_LOCKS_GUARD:
+        lock = _ODDS_LOCKS.setdefault(slug, threading.Lock())
+    with lock:  # otra competición con la misma liga en su pool puede estar descargándola
+        cache = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
+        missing = [e for e in dict.fromkeys(event_ids) if e not in cache]
+        if missing:
+            _download_odds(slug, missing, cache, cache_file, session)
+    return {e: cache.get(e) for e in event_ids}, not missing
+
+
+def _download_odds(slug: str, missing: list[str], cache: dict, cache_file: Path,
+                   session: requests.Session | None) -> None:
+    """Descarga las cuotas de `missing` en paralelo, las añade a `cache` y lo guarda."""
+    session = session or requests.Session()
+
+    def job(event_id: str):
+        try:
+            return event_id, _summary_odds(session, slug, event_id), True
+        except (requests.RequestException, ValueError):
+            return event_id, None, False
+
+    with ThreadPoolExecutor(8) as pool:
+        for event_id, odds, ok in pool.map(job, missing):
+            if ok:
+                cache[event_id] = odds
+    write_atomic(cache_file, json.dumps(cache))
+
+
 def pseudo_xg(shots, sot):
     shots, sot = np.asarray(shots, dtype=float), np.asarray(sot, dtype=float)
     return XG_PER_SHOT_ON_TARGET * sot + XG_PER_SHOT_OFF_TARGET * np.clip(shots - sot, 0, None)
@@ -187,7 +257,9 @@ def events_frame(events: list[dict], competition: str) -> pd.DataFrame:
     for e in events:
         h, a, odds = e["home"], e["away"], e["odds"] or {}
         played = e["completed"] and h["score"] is not None and a["score"] is not None
-        has_shots = all(v is not None for v in (h["shots"], h["sot"], a["shots"], a["sot"]))
+        # Sin estadística, o 0 tiros de ambos equipos (ESPN rellena con ceros en algunas ligas): sin señal.
+        has_shots = (all(v is not None for v in (h["shots"], h["sot"], a["shots"], a["sot"]))
+                     and h["shots"] + a["shots"] > 0)
         rows.append(
             {
                 "id": f"espn:{e['id']}",

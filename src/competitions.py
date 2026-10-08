@@ -20,7 +20,8 @@ from dataclasses import dataclass
 import pandas as pd
 import requests
 
-from src import espn_source, understat_source
+from src import espn_source, market_signal, understat_source
+from src import football_data_source as fd
 from src.match_model import (
     STANDARD_COLUMNS,
     LeagueData,
@@ -188,9 +189,19 @@ def map_team_names(lower: pd.DataFrame, upper: pd.DataFrame,
     return mapping
 
 
-def load_competition(comp: Competition, refresh: bool = False,
-                     progress: Callable[[str], None] | None = None, include_lower: bool = True) -> LeagueData:
-    """Descarga los datos de la competición y prepara el modelo (sin entrenarlo)."""
+def espn_odds_codes(comp: Competition) -> tuple[str, ...]:
+    """Competiciones cuya señal de mercado sale de las cuotas pasadas de ESPN: la propia y su pool
+    (en copas), si football-data no las cubre. Una petición por partido de los últimos ~13 meses
+    la primera vez; después, solo los partidos nuevos. La división inferior no: con cuotas solo
+    recientes en ella, empeoraba la validación (Argentina, Países Bajos, Serie B)."""
+    return tuple(c for c in (comp.code, *comp.pool) if not fd.has_odds(c))
+
+
+def load_competition(comp: Competition, refresh: bool = False, progress: Callable[[str], None] | None = None,
+                     include_lower: bool = True, with_market: bool = True) -> LeagueData:
+    """Descarga los datos de la competición y prepara el modelo (sin entrenarlo). Con `with_market`,
+    cruza las cuotas de cierre de football-data.co.uk (y las cuotas pasadas de ESPN donde
+    football-data no llega, ver `espn_odds_codes`) como señal de mercado."""
     now = utc_now()
     lower = comp.lower if include_lower else ()
     if comp.understat:
@@ -206,6 +217,9 @@ def load_competition(comp: Competition, refresh: bool = False,
                                                  away=lower_matches["away"].replace(names))
             matches = pd.concat([matches, lower_matches[STANDARD_COLUMNS]], ignore_index=True)
             sources = sources + lower_sources
+        if with_market:
+            matches, market_sources = market_signal.attach(matches, progress, espn_odds_codes(comp))
+            sources = sources + market_sources
         return build_league_data(comp.code, comp.name, matches, sources, "xG", since)
 
     years_back = ESPN_CUP_YEARS if comp.is_cup else ESPN_LEAGUE_YEARS
@@ -217,6 +231,9 @@ def load_competition(comp: Competition, refresh: bool = False,
     signal = "xG aproximado (tiros)" if coverage >= 0.5 else "goles"
     since = pd.Timestamp(f"{years[0]}-01-01") + pd.Timedelta(days=180)  # medio año de historial previo
     cups = frozenset(c.code for c in COMPETITIONS if c.is_cup)
+    if with_market:
+        matches, market_sources = market_signal.attach(matches, progress, espn_odds_codes(comp))
+        sources = sources + market_sources
     return build_league_data(comp.code, comp.name, matches, sources, signal, since, train_on_focus=not comp.is_cup,
                              kappa_exclude=cups)
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import html
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 import requests
@@ -196,9 +197,13 @@ def _model_or_error(code: str) -> mm.LeagueModel | None:
 
 
 def _browser_timezone() -> str | None:
+    """Zona horaria del navegador, si Python la conoce (Chrome usa nombres antiguos como
+    "America/Buenos_Aires", que sin el paquete tzdata no existen en algunos sistemas)."""
     try:
-        return st.context.timezone
-    except AttributeError:
+        tz = st.context.timezone
+        ZoneInfo(tz)
+        return tz
+    except (AttributeError, TypeError, ValueError, ZoneInfoNotFoundError):
         return None
 
 
@@ -327,11 +332,15 @@ def _detail_html(pred: mm.MatchPrediction) -> str:
 
     def team_block(name: str, snap: dict, att: float, dfn: float, venue: str) -> str:
         recent = snap["recent_rows"]
+        odds = recent[recent["mkt_real"]] if "mkt_real" in recent else recent.iloc[0:0]
+        market = (f"<span title='Goles esperados a favor / en contra según las cuotas de cierre de "
+                  f"{len(odds)} de sus últimos {len(recent)} partidos'>Mercado {odds['mf'].mean():.2f} / "
+                  f"{odds['ma'].mean():.2f}</span>" if len(odds) else "")
         return (f"<div class='pd-ts'><div class='pd-ts-head'><b>{_esc(name)}</b>{_form_html(snap['form_rows'])}</div>"
                 f"<div class='pd-ts-meta'><span title='Puntos en los últimos 5 partidos {venue}'>"
                 f"{int(snap['venue_rows']['pts'].sum())} pts {venue}</span>"
                 f"<span title='{signal} a favor / en contra, media de los últimos {len(recent)} partidos'>"
-                f"{signal} {recent['sf'].mean():.2f} / {recent['sa'].mean():.2f}</span>"
+                f"{signal} {recent['sf'].mean():.2f} / {recent['sa'].mean():.2f}</span>{market}"
                 f"<span title='Ataque / defensa ajustados por rival (1.00 = media)'>"
                 f"Atq {att:.2f} · Def {dfn:.2f}</span>"
                 f"<span title='Días desde su último partido en los datos descargados'>"
@@ -394,6 +403,7 @@ def _validation_table(models: dict[str, mm.LeagueModel]) -> pd.DataFrame:
             "Competición": comps.BY_CODE[code].name,
             "Señal": m.data.signal_name,
             "Peso señal": f"{t.signal_weight:.0%}",
+            "Peso mercado": f"{t.market_weight:.0%}",
             "ρ (Dixon-Coles)": round(t.rho, 3),
             "Log loss referencia": round(t.ll_baseline, 3),
             "Log loss modelo": round(t.ll_ensemble, 3),
@@ -511,14 +521,19 @@ def section_today(tz: str) -> None:
             "- **Poisson (Dixon-Coles):** fuerza de ataque/defensa ajustada por rival (12 meses ponderados por "
             "antigüedad, mezcla de señal y goles con pesos elegidos con datos) → goles esperados λ, con el total "
             "acercado a la media de la competición → matriz de marcadores con la corrección de Dixon-Coles.\n"
+            "- **Señal de mercado:** donde hay cuotas de cierre de partidos anteriores (football-data.co.uk en "
+            "21 ligas y sus divisiones inferiores; ESPN, desde finales de 2025, en copas y ligas sudamericanas), "
+            "se despejan los goles esperados que implican y entran como tercera señal de fuerza: recogen lo que "
+            "el mercado sabía (fichajes, lesiones, alineaciones). Nunca se usan las cuotas del propio partido.\n"
             "- **Recién ascendidos:** su historial de la división inferior (ESPN) entra en el cálculo de fuerzas, "
             "con una calibración de su nivel estimada con ascensos anteriores.\n"
             "- **Regresión logística:** reajusta la señal de Poisson con la racha de puntos, la localía y el "
             "descanso. **Ensemble:** el peso de cada modelo minimiza el log loss en el 30% más reciente.\n"
-            "- **Mercado:** probabilidades de las cuotas de DraftKings (vía ESPN) sin el margen de la casa. La "
-            "etiqueta amarilla marca el resultado al que el modelo da 10 o más puntos más que el mercado; **no es "
-            "una recomendación de apuesta**: el mercado suele ser más preciso que cualquier modelo público.\n"
-            "- **No incluye** lesiones, sanciones ni alineaciones; el descanso solo cuenta los partidos de las "
+            "- **Mercado del partido:** probabilidades de las cuotas de DraftKings (vía ESPN) sin el margen de la "
+            "casa. La etiqueta amarilla marca el resultado al que el modelo da 10 o más puntos más que el mercado; "
+            "**no es una recomendación de apuesta**: el mercado suele ser más preciso que cualquier modelo público.\n"
+            "- **No incluye** las lesiones, sanciones ni alineaciones del propio partido (solo, de forma indirecta, "
+            "las que ya reflejaban las cuotas de partidos anteriores); el descanso solo cuenta los partidos de las "
             "competiciones descargadas.\n"
             "- En partidos ya jugados, la regresión logística se entrenó con toda la temporada: el "
             "\"acertó/falló\" es orientativo, no un backtest.\n"
@@ -598,13 +613,14 @@ def _backtest_row(code: str, r: backtest.BacktestResult) -> dict:
 def section_performance() -> None:
     st.markdown(
         "<div class='pd-note'>Cada modelo se valida con el 30% más reciente de su histórico (partidos que la "
-        "regresión logística no vio al entrenar) y, donde football-data.co.uk publica cuotas, se compara con "
-        "las <b>cuotas de cierre</b> de esos mismos partidos: la referencia más exigente, porque recogen toda la "
-        "información del mercado justo antes del inicio. Log loss: menor es mejor.</div>", unsafe_allow_html=True)
+        "regresión logística no vio al entrenar) y se compara con las <b>cuotas de cierre</b> de esos mismos "
+        "partidos (football-data.co.uk; en copas y ligas que no cubre, las que ESPN guarda desde finales de "
+        "2025): la referencia más exigente, porque recogen toda la información del mercado justo antes del "
+        "inicio. Log loss: menor es mejor.</div>", unsafe_allow_html=True)
     with st.container(key="pd_perf_form"):
         code = st.selectbox("Liga o copa", ORDERED_CODES, key="pd_perf_code",
                             format_func=lambda c: f"{comps.BY_CODE[c].name} · "
-                                                  f"{'con cuotas' if fd.has_odds(c) else 'solo validación'}")
+                                                  f"{'cuotas históricas' if fd.has_odds(c) else 'cuotas recientes'}")
     model = _model_or_error(code)
     if model is None:
         return
@@ -613,51 +629,50 @@ def section_performance() -> None:
     c1.metric("Log loss del modelo", f"{t.ll_ensemble:.4f}", help=f"{t.n_val} partidos de validación ({t.val_period})")
     c2.metric("Referencia (frecuencias 1/X/2)", f"{t.ll_baseline:.4f}")
     c3.metric("Mejora sobre la referencia", f"{t.ll_baseline - t.ll_ensemble:+.4f}")
-    st.caption(f"Parámetros elegidos con datos: señal {model.data.signal_name} {t.signal_weight:.0%} / goles "
+    market = (f"mercado {t.market_weight:.0%} ({model.data.market_coverage:.0%} de partidos con cuotas en 12 "
+              f"meses) · " if t.market_weight else "sin señal de mercado · ")
+    st.caption(f"Parámetros elegidos con datos: {market}señal {model.data.signal_name} {t.signal_weight:.0%} / goles "
                f"{1 - t.signal_weight:.0%} · Dixon-Coles ρ {t.rho:+.3f} · total de goles {t.total_shrink:.0%} propio "
                f"/ {1 - t.total_shrink:.0%} media · recién llegados ×{t.newcomer[0]:.2f} goles, ×{t.newcomer[1]:.2f} "
                f"rival · ensemble {t.w_poisson:.0%} Poisson / {1 - t.w_poisson:.0%} logística.")
 
-    if not fd.has_odds(code):
-        st.info("football-data.co.uk no publica cuotas de esta competición: solo hay validación, no backtest "
-                "contra el mercado.")
-    else:
-        with st.spinner("Comparando con las cuotas de cierre…"):
-            try:
-                r = _backtest(code)
-            except mm.PredictionError as exc:
-                st.warning(str(exc))
-                r = None
-        if r is not None:
-            st.markdown(f"**Contra el mercado** · {r.n_matched} partidos ({r.period}) · cuotas: {r.odds_source}")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Modelo", f"{r.ll_model:.4f}")
-            m2.metric("Mercado (cierre)", f"{r.ll_market:.4f}")
-            m3.metric("Distancia", f"{r.gap:+.4f}", help="Log loss modelo − mercado: negativo = mejor que el cierre")
-            m4.metric("Peso en la mezcla", f"{r.alpha:.0%}",
-                      help="Mezcla modelo + mercado con menor log loss. ~0% = el modelo no añade información "
-                           f"al cierre (log loss de la mezcla, con validación cruzada: {r.ll_blend_cv:.4f}).")
-            if r.ll_ou_model is not None:
-                st.caption(f"Over/Under 2.5 ({r.n_ou} partidos): modelo {r.ll_ou_model:.4f} · mercado "
-                           f"{r.ll_ou_market:.4f}.")
-            st.markdown("ROI simulado apostando 1 unidad a la cuota de cierre cuando el modelo da al menos "
-                        "el umbral de puntos más que el mercado (orientativo: muestras pequeñas, mucho ruido):")
-            roi = r.roi.assign(ROI=r.roi["ROI"].map(lambda x: f"{x * 100:+.1f}%" if pd.notna(x) else "—"))
-            st.dataframe(roi, hide_index=True, width="stretch")
+    with st.spinner("Comparando con las cuotas de cierre…"):
+        try:
+            r = _backtest(code)
+        except mm.PredictionError as exc:
+            st.warning(str(exc))
+            r = None
+    if r is not None:
+        st.markdown(f"**Contra el mercado** · {r.n_matched} partidos ({r.period}) · cuotas: {r.odds_source}")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Modelo", f"{r.ll_model:.4f}")
+        m2.metric("Mercado (cierre)", f"{r.ll_market:.4f}")
+        m3.metric("Distancia", f"{r.gap:+.4f}", help="Log loss modelo − mercado: negativo = mejor que el cierre")
+        m4.metric("Peso en la mezcla", f"{r.alpha:.0%}",
+                  help="Mezcla modelo + mercado con menor log loss. ~0% = el modelo no añade información "
+                       f"al cierre (log loss de la mezcla, con validación cruzada: {r.ll_blend_cv:.4f}).")
+        if r.ll_ou_model is not None:
+            st.caption(f"Over/Under 2.5 ({r.n_ou} partidos): modelo {r.ll_ou_model:.4f} · mercado "
+                       f"{r.ll_ou_market:.4f}.")
+        st.markdown("ROI simulado apostando 1 unidad a la cuota de cierre cuando el modelo da al menos "
+                    "el umbral de puntos más que el mercado (orientativo: muestras pequeñas, mucho ruido):")
+        roi = r.roi.assign(ROI=r.roi["ROI"].map(lambda x: f"{x * 100:+.1f}%" if pd.notna(x) else "—"))
+        st.dataframe(roi, hide_index=True, width="stretch")
 
-    if st.button("Resumen de todas las competiciones con cuotas", icon=":material/table_chart:"):
-        rows = []
-        codes = [c for c in ORDERED_CODES if fd.has_odds(c)]
+    if st.button("Resumen de todas las competiciones", icon=":material/table_chart:"):
+        rows, skipped = [], []
         bar = st.progress(0.0)
-        for n, c in enumerate(codes, start=1):
-            bar.progress(n / len(codes), text=f"{comps.BY_CODE[c].name} ({n}/{len(codes)})…")
+        for n, c in enumerate(ORDERED_CODES, start=1):
+            bar.progress(n / len(ORDERED_CODES), text=f"{comps.BY_CODE[c].name} ({n}/{len(ORDERED_CODES)})…")
             try:
                 rows.append(_backtest_row(c, _backtest(c)))
             except Exception as exc:  # noqa: BLE001 — una competición sin datos no corta el resumen
-                st.warning(f"{comps.BY_CODE[c].name}: {exc}")
+                skipped.append(f"{comps.BY_CODE[c].name} ({exc})")
         bar.empty()
         if rows:
             st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        if skipped:
+            st.caption("Sin backtest: " + "; ".join(skipped))
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,9 @@
 
 Toma las predicciones del periodo de validación de un modelo entrenado (que la
 regresión logística no vio al entrenar), las cruza por fecha, marcador y
-nombres con los partidos de football-data.co.uk y compara:
+nombres con los partidos de football-data.co.uk (o, en las competiciones que
+no cubre, toma las cuotas previas que ESPN guarda en la ficha de cada partido
+desde finales de 2025) y compara:
 
 - log loss 1X2 del modelo frente al de las cuotas de cierre (sin margen);
 - la mezcla modelo + mercado: si el modelo aporta información que el mercado
@@ -23,6 +25,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from src import espn_source
 from src import football_data_source as fd
 from src.match_model import CLASSES, LeagueModel, PredictionError, multiclass_log_loss, team_similarity
 
@@ -116,16 +119,33 @@ def _roi_table(matched: pd.DataFrame, p_model: np.ndarray, p_market: np.ndarray)
     return pd.DataFrame(rows)
 
 
+def espn_odds_rows(preds: pd.DataFrame, code: str) -> tuple[pd.DataFrame, list[str]]:
+    """Predicciones de partidos de ESPN con las cuotas previas de su ficha (DraftKings)."""
+    ids = preds["id"].astype(str) if "id" in preds else pd.Series("", index=preds.index)
+    rows = preds[ids.str.startswith("espn:")]
+    odds, _ = espn_source.fetch_past_odds(code, [i.removeprefix("espn:") for i in rows["id"].astype(str)])
+    table = pd.DataFrame([odds.get(i.removeprefix("espn:")) or {} for i in rows["id"].astype(str)], index=rows.index)
+    table = table.reindex(columns=["home", "draw", "away", "line", "over", "under"])
+    at_25 = pd.to_numeric(table["line"], errors="coerce") == 2.5
+    matched = rows.assign(odds_h=pd.to_numeric(table["home"]), odds_d=pd.to_numeric(table["draw"]),
+                          odds_a=pd.to_numeric(table["away"]),
+                          odds_over25=pd.to_numeric(table["over"]).where(at_25),
+                          odds_under25=pd.to_numeric(table["under"]).where(at_25),
+                          odds_source="DraftKings (ESPN)")
+    return matched, [f"{espn_source.ESPN}/{code}/summary?event=<id>"]
+
+
 def run(model: LeagueModel) -> BacktestResult:
     data, t = model.data, model.trained
     code = data.competition
-    if not fd.has_odds(code):
-        raise PredictionError(f"football-data.co.uk no publica cuotas de {data.name}: no hay backtest.")
     preds = t.val_predictions[t.val_predictions["competition"] == code]
     if preds.empty:
         raise PredictionError(f"Sin partidos de validación de {data.name}.")
-    fd_rows, urls = fd.load(code, preds["datetime"].min(), preds["datetime"].max())
-    matched = match_predictions(preds, fd_rows)
+    if fd.has_odds(code):
+        fd_rows, urls = fd.load(code, preds["datetime"].min(), preds["datetime"].max())
+        matched = match_predictions(preds, fd_rows)
+    else:
+        matched, urls = espn_odds_rows(preds, code)
     matched = matched[matched[["odds_h", "odds_d", "odds_a"]].notna().all(axis=1)].reset_index(drop=True)
     if len(matched) < 50:
         raise PredictionError(f"Solo {len(matched)} partidos de {data.name} cruzados con cuotas: muy pocos.")

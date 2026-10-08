@@ -6,18 +6,20 @@ partidos con columnas estándar (ver `STANDARD_COLUMNS`) que preparan
 `src/understat_source.py` y `src/espn_source.py`, orquestados por
 `src/competitions.py`.
 
-La fuerza de cada equipo se estima con dos señales y se mezclan:
+La fuerza de cada equipo se estima con hasta tres señales y se mezclan:
 
 - la **señal de calidad de ocasiones**: xG real (Understat) o, si no hay, un
   xG aproximado a partir de tiros a puerta y tiros fuera (ESPN);
-- los **goles**.
+- los **goles**;
+- el **mercado**: goles esperados implícitos en las cuotas de cierre de los
+  partidos anteriores (`src/market_signal.py`), donde las hay.
 
 Para cada señal, el ataque/defensa de cada equipo se ajusta por la calidad de
 sus rivales (ajuste proporcional iterativo sobre los últimos 12 meses, con un
 suavizado bayesiano de 2 partidos "promedio") y se mezcla con su forma en los
-últimos 10 partidos. El peso de la forma reciente y el de la señal frente a
-los goles se eligen con datos (máxima verosimilitud de los goles reales en el
-periodo de entrenamiento).
+últimos 10 partidos. El peso de la forma reciente y el de cada señal se eligen
+con datos (máxima verosimilitud de los goles reales en el periodo de
+entrenamiento).
 
 Modelos:
 - Poisson con corrección de Dixon-Coles (ρ por máxima verosimilitud): matriz
@@ -66,6 +68,15 @@ STRENGTH_FLOOR = 0.05  # una racha sin goles no debe dar fuerza 0 (log -inf en l
 SHRINK_GRID = (0.0, 2.0, 5.0, 10.0, 20.0, 40.0, 1e9)
 # Peso de la señal (xG / xG aproximado) frente a los goles en la fuerza.
 SIGNAL_WEIGHT_GRID = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.2, 0.0)
+# Peso de la señal de mercado (goles esperados implícitos en las cuotas de cierre de partidos
+# anteriores) frente a la mezcla de señal y goles.
+MARKET_WEIGHT_GRID = (0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+# Uso de la señal de mercado según los partidos con cuotas: con cuotas en casi todo el histórico, su
+# peso se aprende con datos; si solo hay cuotas recientes (ESPN las guarda desde finales de 2025), el
+# entrenamiento no puede estimarlo y se usa el peso típico de las ligas con histórico completo.
+MARKET_LEARN_COVERAGE = 0.6  # partidos con cuotas desde el inicio del entrenamiento
+MARKET_RECENT_COVERAGE = 0.5  # partidos con cuotas en los últimos 12 meses
+MARKET_WEIGHT_DEFAULT = 0.7
 RHO_BOUNDS = (-0.2, 0.2)
 # Peso del total de goles propio del partido frente a la media de la competición (1 = sin acercar).
 TOTAL_SHRINK_GRID = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3)
@@ -179,13 +190,18 @@ def team_long_frame(played: pd.DataFrame) -> pd.DataFrame:
     """Una fila por equipo y partido jugado (vista desde ese equipo)."""
     common = {"id": played["id"], "season": played["season"], "datetime": played["datetime"],
               "neutral": played["neutral"], "competition": played["competition"]}
+    h_mkt = played["h_mkt"] if "h_mkt" in played else np.nan
+    a_mkt = played["a_mkt"] if "a_mkt" in played else np.nan
+    common["mkt_real"] = played["mkt_real"] if "mkt_real" in played else False  # λ de cuotas (no relleno)
     home = pd.DataFrame(
         {**common, "team": played["home"], "opp": played["away"], "venue": "h",
-         "gf": played["hg"], "ga": played["ag"], "sf": played["h_sig"], "sa": played["a_sig"]}
+         "gf": played["hg"], "ga": played["ag"], "sf": played["h_sig"], "sa": played["a_sig"],
+         "mf": h_mkt, "ma": a_mkt}
     )
     away = pd.DataFrame(
         {**common, "team": played["away"], "opp": played["home"], "venue": "a",
-         "gf": played["ag"], "ga": played["hg"], "sf": played["a_sig"], "sa": played["h_sig"]}
+         "gf": played["ag"], "ga": played["hg"], "sf": played["a_sig"], "sa": played["h_sig"],
+         "mf": a_mkt, "ma": h_mkt}
     )
     long = pd.concat([home, away], ignore_index=True)
     long["pts"] = np.select([long["gf"] > long["ga"], long["gf"] == long["ga"]], [3, 1], 0)
@@ -195,11 +211,14 @@ def team_long_frame(played: pd.DataFrame) -> pd.DataFrame:
 class MatchIndex:
     """Partidos jugados indexados por fecha y por equipo (con ids enteros), para
     cortar el historial anterior a cualquier instante sin filtrar DataFrames.
-    Con `has_signal=False` la señal es la propia columna de goles."""
+    Con `has_signal=False` la señal es la propia columna de goles; con `has_market=True`
+    también se ajusta la fuerza según el mercado (columnas h_mkt / a_mkt, sin NaN)."""
 
-    def __init__(self, played: pd.DataFrame, has_signal: bool = True, focus: str | None = None):
+    def __init__(self, played: pd.DataFrame, has_signal: bool = True, focus: str | None = None,
+                 has_market: bool = False):
         self.played = played.sort_values(["datetime", "id"]).reset_index(drop=True)
         self.has_signal = has_signal
+        self.has_market = has_market
         self.focus = focus  # competición que se predice (cuenta los partidos "en la competición")
         self.teams = sorted(set(self.played["home"]) | set(self.played["away"]))
         self.team_id = {t: i for i, t in enumerate(self.teams)}
@@ -212,6 +231,8 @@ class MatchIndex:
             "sig_h": p["h_sig"].to_numpy(float), "sig_a": p["a_sig"].to_numpy(float),
             "gls_h": p["hg"].to_numpy(float), "gls_a": p["ag"].to_numpy(float),
         }
+        if has_market:
+            self.arrays["mkt_h"], self.arrays["mkt_a"] = p["h_mkt"].to_numpy(float), p["a_mkt"].to_numpy(float)
         long = team_long_frame(p)
         self.team_rows = {team: rows.reset_index(drop=True) for team, rows in long.groupby("team", sort=False)}
         self.team_arrays = {
@@ -224,6 +245,9 @@ class MatchIndex:
                 "sig_against": rows["sa"].to_numpy(float),
                 "gls_for": rows["gf"].to_numpy(float),
                 "gls_against": rows["ga"].to_numpy(float),
+                "mkt_for": rows["mf"].to_numpy(float),
+                "mkt_against": rows["ma"].to_numpy(float),
+                "mkt_real": rows["mkt_real"].to_numpy(bool),
                 "pts": rows["pts"].to_numpy(float),
                 "in_focus": (rows["competition"] == focus).to_numpy() if focus else np.ones(len(rows), bool),
             }
@@ -339,9 +363,9 @@ def team_snapshot(index: MatchIndex, team: str, venue: str, cutoff: pd.Timestamp
         "ppg5": float(pts[form].mean()),
         "ppg5_venue": float(pts[same_venue].mean()) if len(same_venue) else float(pts[form].mean()),
         "rest_days": float((cutoff.to_datetime64() - times[end - 1]) / np.timedelta64(1, "D")),
+        "mkt_share": float(arrays["mkt_real"][recent].mean()),  # partidos recientes con cuotas
     }
-    for kind in ("sig", "gls"):
-        r = ratings[kind]
+    for kind, r in ratings.items():
         att, dfn = _recent_strength(arrays, recent, r, kind)
         snap[f"att_recent_{kind}"], snap[f"def_recent_{kind}"] = att, dfn
         snap[f"att_long_{kind}"] = float(r.attack[r.index[team]])
@@ -373,6 +397,8 @@ def window_ratings(index: MatchIndex, cutoff: pd.Timestamp, cache: dict) -> dict
             sig = fit_ratings_arrays(*common, arr["sig_h"], arr["sig_a"], *rest)
             gls = fit_ratings_arrays(*common, arr["gls_h"], arr["gls_a"], *rest) if index.has_signal else sig
             cache[day] = {"sig": sig, "gls": gls}
+            if index.has_market:
+                cache[day]["mkt"] = fit_ratings_arrays(*common, arr["mkt_h"], arr["mkt_a"], *rest)
     return cache[day]
 
 
@@ -394,11 +420,18 @@ def blended(snap: dict, shrink: float, kind: str, side: str) -> float:
     return w * snap[f"{side}_recent_{kind}"] + (1 - w) * snap[f"{side}_long_{kind}"]
 
 
-def strength(snap: dict, shrink: float, signal_weight: float, side: str) -> float:
-    """Fuerza final: media geométrica ponderada de la de la señal y la de goles."""
+def strength(snap: dict, shrink: float, signal_weight: float, side: str, market_weight: float = 0.0) -> float:
+    """Fuerza final: media geométrica ponderada de la de la señal y la de goles y, con
+    `market_weight` > 0, de esa mezcla con la del mercado (en proporción a sus partidos recientes
+    con cuotas)."""
     sig = max(blended(snap, shrink, "sig", side), STRENGTH_FLOOR)
     gls = max(blended(snap, shrink, "gls", side), STRENGTH_FLOOR)
-    return float(np.exp(signal_weight * np.log(sig) + (1 - signal_weight) * np.log(gls)))
+    log_s = signal_weight * np.log(sig) + (1 - signal_weight) * np.log(gls)
+    if market_weight:
+        mkt = max(blended(snap, shrink, "mkt", side), STRENGTH_FLOOR)
+        mw = market_weight * snap["mkt_share"]  # sin cuotas recientes, la fuerza de mercado es solo relleno
+        log_s = mw * np.log(mkt) + (1 - mw) * log_s
+    return float(np.exp(log_s))
 
 
 def base_goals(goals_home, goals_away, neutral):
@@ -408,13 +441,15 @@ def base_goals(goals_home, goals_away, neutral):
 
 
 def expected_goals(h: dict, a: dict, ratings: dict[str, LeagueRatings], shrink: float,
-                   signal_weight: float, neutral: bool = False) -> tuple[float, float]:
+                   signal_weight: float, neutral: bool = False, market_weight: float = 0.0) -> tuple[float, float]:
     """λ = goles medios reales de la liga (por sede) × ataque propio × defensa rival.
     La señal y los goles fijan la fuerza relativa; el nivel sale de los goles
     reales (el xG de Understat, por ejemplo, va por encima de los goles marcados)."""
     gh, ga = base_goals(ratings["gls"].goals_home, ratings["gls"].goals_away, neutral)
-    lam_h = gh * strength(h, shrink, signal_weight, "att") * strength(a, shrink, signal_weight, "def")
-    lam_a = ga * strength(a, shrink, signal_weight, "att") * strength(h, shrink, signal_weight, "def")
+    s = {(name, side): strength(snap, shrink, signal_weight, side, market_weight)
+         for name, snap in (("h", h), ("a", a)) for side in ("att", "def")}
+    lam_h = gh * s[("h", "att")] * s[("a", "def")]
+    lam_a = ga * s[("a", "att")] * s[("h", "def")]
     return float(np.clip(lam_h, LAMBDA_MIN, LAMBDA_MAX)), float(np.clip(lam_a, LAMBDA_MIN, LAMBDA_MAX))
 
 
@@ -516,6 +551,7 @@ def build_history(index: MatchIndex, since: pd.Timestamp, competition: str | Non
         h, a, ratings = snap
         rows.append(
             {
+                "id": m.id,
                 "competition": m.competition,
                 "datetime": m.datetime,
                 "home": m.home,
@@ -533,12 +569,24 @@ def build_history(index: MatchIndex, since: pd.Timestamp, competition: str | Non
     return pd.DataFrame(rows)
 
 
-def history_lambdas(hist: pd.DataFrame, shrink: float, signal_weight: float) -> tuple[np.ndarray, np.ndarray]:
+def history_lambdas(hist: pd.DataFrame, shrink: float, signal_weight: float,
+                    market_weight: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    def col(name: str) -> np.ndarray:  # numpy: se llama cientos de veces al elegir los pesos
+        return hist[name].to_numpy(float)
+
     def mix(side: str, part: str) -> np.ndarray:
-        w = hist[f"{side}_n_recent"] / (hist[f"{side}_n_recent"] + shrink)
-        logs = [np.log(np.maximum(w * hist[f"{side}_{part}_recent_{k}"] + (1 - w) * hist[f"{side}_{part}_long_{k}"],
-                                  STRENGTH_FLOOR)) for k in ("sig", "gls")]
-        return np.exp(signal_weight * logs[0] + (1 - signal_weight) * logs[1]).to_numpy()
+        n_recent = col(f"{side}_n_recent")
+        w = n_recent / (n_recent + shrink)
+
+        def log_strength(kind: str) -> np.ndarray:
+            return np.log(np.maximum(w * col(f"{side}_{part}_recent_{kind}") + (1 - w) * col(f"{side}_{part}_long_{kind}"),
+                                     STRENGTH_FLOOR))
+
+        log_s = signal_weight * log_strength("sig") + (1 - signal_weight) * log_strength("gls")
+        if market_weight:
+            mw = market_weight * col(f"{side}_mkt_share")
+            log_s = mw * log_strength("mkt") + (1 - mw) * log_s
+        return np.exp(log_s)
 
     gh, ga = base_goals(hist["goals_home"].to_numpy(), hist["goals_away"].to_numpy(), hist["neutral"].to_numpy())
     lam_h = np.clip(gh * mix("h", "att") * mix("a", "def"), LAMBDA_MIN, LAMBDA_MAX)
@@ -601,15 +649,17 @@ def competition_kappa(competition: np.ndarray, hg: np.ndarray, ag: np.ndarray, l
     """Calibración del nivel de goles por competición y sede: goles reales / goles esperados,
     con un suavizado de KAPPA_PRIOR_MATCHES partidos. Corrige que la base de λ sea la media
     de todas las competiciones mezcladas (divisiones inferiores, copas con sus ligas)."""
-    df = pd.DataFrame({"c": competition, "hg": hg, "ag": ag, "lh": lam_h, "la": lam_a})
-    g = df.groupby("c").agg(hg=("hg", "sum"), ag=("ag", "sum"), lh=("lh", "sum"), la=("la", "sum"), n=("hg", "size"))
+    comps, idx = np.unique(np.asarray(competition, dtype=str), return_inverse=True)
+    n = np.bincount(idx, minlength=len(comps))
+    sums = {k: np.bincount(idx, np.asarray(v, float), len(comps)) for k, v in
+            (("hg", hg), ("ag", ag), ("lh", lam_h), ("la", lam_a))}
     kappa = {}
-    for comp, r in g.iterrows():
+    for i, comp in enumerate(comps):
         if comp in exclude:
             continue
-        for side, goals, lam in (("h", r.hg, r.lh), ("a", r.ag, r.la)):
-            prior = KAPPA_PRIOR_MATCHES * lam / r.n
-            kappa[(comp, side)] = float((goals + prior) / (lam + prior))
+        for side, goals, lam in (("h", sums["hg"][i], sums["lh"][i]), ("a", sums["ag"][i], sums["la"][i])):
+            prior = KAPPA_PRIOR_MATCHES * lam / n[i]
+            kappa[(str(comp), side)] = float((goals + prior) / (lam + prior))
     return kappa
 
 
@@ -676,12 +726,15 @@ class TrainedModels:
     evaluated_on: str = "all"  # "focus" (solo la competición) o "all" (todo el pool)
     n_val_focus: int = 0  # partidos de validación de la propia competición (copas con pool)
     ll_ensemble_focus: float | None = None
+    market_weight: float = 0.0  # peso de la fuerza según el mercado (cuotas de cierre de partidos anteriores)
 
 
 def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None = None,
-                 kappa_exclude: frozenset[str] = frozenset()) -> TrainedModels:
+                 kappa_exclude: frozenset[str] = frozenset(),
+                 market_weights: tuple[float, ...] = (0.0,)) -> TrainedModels:
     """Entrena Poisson + logística sobre el histórico de instantáneas. `kappa_exclude`: competiciones
-    sin calibración propia de goles (las copas: pocos partidos, y en validación empeoraba)."""
+    sin calibración propia de goles (las copas: pocos partidos, y en validación empeoraba).
+    `market_weights`: pesos posibles de la fuerza según el mercado (columnas *_mkt del histórico)."""
     hist = hist.sort_values("datetime").reset_index(drop=True)
     n_val = max(MIN_VAL_ROWS, int(len(hist) * VAL_FRACTION))
     if len(hist) - n_val < MIN_TRAIN_ROWS:
@@ -695,21 +748,29 @@ def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None 
     comp = hist["competition"].to_numpy()
     hg, ag = hist["hg"].to_numpy(float), hist["ag"].to_numpy(float)
 
-    # 1) Forma reciente vs. 12 meses, señal vs. goles y calibración por competición:
+    # 1) Forma reciente vs. 12 meses, señal vs. goles (y mercado) y calibración por competición:
     #    máxima verosimilitud de los goles reales en el periodo de entrenamiento.
+    #    Con un peso de mercado fijo (cuotas solo recientes, ausentes en casi todo el entrenamiento),
+    #    la forma y la señal se eligen sin mercado y luego se le aplica su peso.
     weights = SIGNAL_WEIGHT_GRID if has_signal else (1.0,)
+    fixed_market = len(market_weights) == 1 and market_weights[0] > 0
     best, best_ll = None, -np.inf
     for shrink in SHRINK_GRID:
         for sw in weights:
-            lh, la = history_lambdas(train, shrink, sw)
-            kappa = competition_kappa(comp[train_mask], hg[train_mask], ag[train_mask], lh, la, kappa_exclude)
-            lh, la = apply_kappa(comp[train_mask], lh, la, kappa)
-            ll = poisson.logpmf(hg[train_mask], lh).sum() + poisson.logpmf(ag[train_mask], la).sum()
-            if ll > best_ll:
-                best, best_ll = (shrink, sw, kappa), ll
-    shrink, signal_weight, kappa = best
+            for mw in ((0.0,) if fixed_market else market_weights):
+                lh, la = history_lambdas(train, shrink, sw, mw)
+                kappa = competition_kappa(comp[train_mask], hg[train_mask], ag[train_mask], lh, la, kappa_exclude)
+                lh, la = apply_kappa(comp[train_mask], lh, la, kappa)
+                ll = poisson.logpmf(hg[train_mask], lh).sum() + poisson.logpmf(ag[train_mask], la).sum()
+                if ll > best_ll:
+                    best, best_ll = (shrink, sw, mw, kappa), ll
+    shrink, signal_weight, market_weight, kappa = best
+    if fixed_market:
+        market_weight = market_weights[0]
+        lh, la = history_lambdas(train, shrink, signal_weight, market_weight)
+        kappa = competition_kappa(comp[train_mask], hg[train_mask], ag[train_mask], lh, la, kappa_exclude)
 
-    lam_h, lam_a = apply_kappa(comp, *history_lambdas(hist, shrink, signal_weight), kappa)
+    lam_h, lam_a = apply_kappa(comp, *history_lambdas(hist, shrink, signal_weight, market_weight), kappa)
     # 1b) Recién llegados (ascendidos): calibración de su nivel de goles a favor y en contra.
     new_h = (hist["h_n_focus"] < NEWCOMER_MATCHES).to_numpy() if "h_n_focus" in hist else np.zeros(len(hist), bool)
     new_a = (hist["a_n_focus"] < NEWCOMER_MATCHES).to_numpy() if "a_n_focus" in hist else np.zeros(len(hist), bool)
@@ -754,7 +815,8 @@ def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None 
     over = [goal_markets(reweight_matrix(score_matrix(lh, la, rho), pe))[0]
             for lh, la, pe in zip(lam_h[val_mask], lam_a[val_mask], p_ens_all)]
     val_predictions = pd.DataFrame({
-        "datetime": val["datetime"], "competition": val["competition"], "home": val["home"], "away": val["away"],
+        "id": val["id"] if "id" in val else None, "datetime": val["datetime"], "competition": val["competition"],
+        "home": val["home"], "away": val["away"],
         "hg": val["hg"], "ag": val["ag"], "result": val["result"],
         "lam_h": lam_h[val_mask], "lam_a": lam_a[val_mask], "over25": over,
         "newcomer": (new_h | new_a)[val_mask], "low_data": low[val_mask],
@@ -792,6 +854,7 @@ def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None 
         val_predictions=val_predictions,
         evaluated_on="focus" if use_focus else "all",
         **focus_metrics,
+        market_weight=market_weight,
     )
 
 
@@ -811,6 +874,13 @@ class LeagueData:
     training_since: pd.Timestamp  # primer partido usado como fila de entrenamiento
     train_on_focus: bool = True  # filas de entrenamiento: solo la competición (ligas) o todo el pool (copas)
     kappa_exclude: frozenset = frozenset()  # competiciones sin calibración propia de goles (copas)
+    market_mode: str | None = None  # señal de mercado: "learn" (peso aprendido), "fixed" (peso típico) o None
+    market_coverage: float = 0.0  # partidos con cuotas en los últimos 12 meses (de la competición o su pool)
+
+    @property
+    def market_weights(self) -> tuple[float, ...]:
+        """Pesos de la señal de mercado entre los que elige el entrenamiento."""
+        return {"learn": MARKET_WEIGHT_GRID, "fixed": (MARKET_WEIGHT_DEFAULT,)}.get(self.market_mode, (0.0,))
 
     @property
     def focus_matches(self) -> pd.DataFrame:
@@ -828,7 +898,10 @@ def build_league_data(competition: str, name: str, matches: pd.DataFrame, source
                       signal_name: str, training_since: pd.Timestamp, train_on_focus: bool = True,
                       kappa_exclude: frozenset = frozenset()) -> LeagueData:
     """Prepara los partidos usables: jugados en 90 minutos, con goles y señal.
-    Donde falta la señal (p. ej. un partido sin estadísticas de tiros) se usan los goles."""
+    Donde falta la señal (p. ej. un partido sin estadísticas de tiros) se usan los goles.
+    Si la competición (en copas, su pool) tiene cuotas de cierre (h_mkt / a_mkt) suficientes (ver
+    MARKET_LEARN_COVERAGE), se usa la señal de mercado; donde falta, se rellena con la señal
+    reescalada al nivel del mercado."""
     matches = matches.sort_values(["datetime", "id"]).reset_index(drop=True)
     usable = matches[matches["played"] & ~matches["extra_time"] & matches["hg"].notna()].copy()
     has_signal = signal_name != "goles"
@@ -836,9 +909,29 @@ def build_league_data(competition: str, name: str, matches: pd.DataFrame, source
     usable["a_sig"] = usable["a_sig"].fillna(usable["ag"]) if has_signal else usable["ag"]
     if usable.empty:
         raise PredictionError(f"Sin partidos jugados para {name}.")
-    index = MatchIndex(usable, has_signal, focus=competition if train_on_focus else None)
+    market_mode, coverage = None, 0.0
+    if "h_mkt" in usable:
+        with_market = usable["h_mkt"].notna() & usable["a_mkt"].notna()
+        scope = (usable["competition"] == competition) if train_on_focus else pd.Series(True, index=usable.index)
+        recent = usable["datetime"] >= usable["datetime"].max() - pd.Timedelta(days=WINDOW_DAYS)
+        coverage = float(with_market[scope & recent].mean()) if (scope & recent).any() else 0.0
+        if with_market[scope & (usable["datetime"] >= training_since)].mean() >= MARKET_LEARN_COVERAGE:
+            market_mode = "learn"
+        elif coverage >= MARKET_RECENT_COVERAGE:
+            market_mode = "fixed"
+        if market_mode:
+            both = usable[with_market]
+            scale = (both["h_mkt"] + both["a_mkt"]).sum() / (both["h_sig"] + both["a_sig"]).sum()
+            # Partido "con mercado" si tiene cuotas o si su competición no tiene ninguna (p. ej. una división
+            # inferior sin cuotas): mkt_share solo baja el peso del mercado por huecos de cuotas reales.
+            no_odds_comp = ~with_market.groupby(usable["competition"]).transform("any")
+            usable["mkt_real"] = with_market | no_odds_comp
+            usable["h_mkt"] = usable["h_mkt"].where(with_market, usable["h_sig"] * scale)
+            usable["a_mkt"] = usable["a_mkt"].where(with_market, usable["a_sig"] * scale)
+    index = MatchIndex(usable, has_signal, focus=competition if train_on_focus else None,
+                       has_market=market_mode is not None)
     return LeagueData(competition, name, matches, index, sources, signal_name, training_since, train_on_focus,
-                      kappa_exclude)
+                      kappa_exclude, market_mode, coverage)
 
 
 @dataclass
@@ -853,7 +946,7 @@ def train_league(data: LeagueData) -> LeagueModel:
         raise PredictionError(f"Sin histórico suficiente para entrenar {data.name}.")
     pooled = (hist["competition"] != data.competition).any()
     return LeagueModel(data, train_models(hist, data.index.has_signal, data.competition if pooled else None,
-                                          data.kappa_exclude))
+                                          data.kappa_exclude, data.market_weights))
 
 
 @dataclass
@@ -893,8 +986,8 @@ class MatchPrediction:
     def attack_defense(self, side: str) -> tuple[float, float]:
         snap = self.home_snap if side == "home" else self.away_snap
         t = self.trained
-        return (strength(snap, t.shrink, t.signal_weight, "att"),
-                strength(snap, t.shrink, t.signal_weight, "def"))
+        return (strength(snap, t.shrink, t.signal_weight, "att", t.market_weight),
+                strength(snap, t.shrink, t.signal_weight, "def", t.market_weight))
 
     @property
     def newcomers(self) -> list[str]:
@@ -945,7 +1038,7 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
     h, a, ratings = snap
     comp = str(fixture["competition"]) if fixture is not None and "competition" in fixture else data.competition
     kh, ka = t.kappa.get((comp, "h"), 1.0), t.kappa.get((comp, "a"), 1.0)
-    lam_h, lam_a = expected_goals(h, a, ratings, t.shrink, t.signal_weight, neutral)
+    lam_h, lam_a = expected_goals(h, a, ratings, t.shrink, t.signal_weight, neutral, t.market_weight)
     lam_h, lam_a = float(np.clip(lam_h * kh, LAMBDA_MIN, LAMBDA_MAX)), float(np.clip(lam_a * ka, LAMBDA_MIN, LAMBDA_MAX))
     new_h, new_a = h["n_focus"] < NEWCOMER_MATCHES, a["n_focus"] < NEWCOMER_MATCHES
     lam_h, lam_a = (float(x) for x in apply_newcomer(lam_h, lam_a, new_h, new_a, *t.newcomer))
