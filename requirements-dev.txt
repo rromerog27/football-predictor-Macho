@@ -1,0 +1,3 @@
+# Dependencias para desarrollo (pruebas). La app publicada solo instala requirements.txt.
+-r requirements.txt
+pytest>=7.4,<8.0

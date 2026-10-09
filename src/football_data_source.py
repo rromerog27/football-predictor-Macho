@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,7 @@ import pandas as pd
 import requests
 
 from src.match_model import PredictionError, SourceInfo
-from src.utils import write_atomic
+from src.utils import CONNECT_TIMEOUT_S, write_atomic
 
 FOOTBALL_DATA = "https://football-data.co.uk"
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) football-predictor-macho"}
@@ -62,7 +63,7 @@ def _download(url: str, cache_file: Path, permanent: bool) -> tuple[pd.DataFrame
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                resp = requests.get(url, headers=HTTP_HEADERS, timeout=60)
+                resp = requests.get(url, headers=HTTP_HEADERS, timeout=(CONNECT_TIMEOUT_S, 60))
                 if resp.status_code == 404:
                     return None, False
                 resp.raise_for_status()
@@ -138,9 +139,11 @@ def load_with_sources(code: str, start: pd.Timestamp, end: pd.Timestamp) -> tupl
     else:
         raise PredictionError(f"football-data.co.uk no tiene cuotas de {code}.")
     lo, hi = start.normalize() - pd.Timedelta(days=1), end.normalize() + pd.Timedelta(days=1)
+    # Una temporada por archivo: se bajan a la vez (de a uno, las 7 temporadas de una liga tardaban ~6 s).
+    with ThreadPoolExecutor(len(files)) as pool:
+        downloads = list(pool.map(lambda f: _download(*f[:3]), files))
     frames, sources = [], []
-    for url, cache_file, permanent, label, cols in files:
-        raw, from_cache = _download(url, cache_file, permanent)
+    for (url, _, _, label, cols), (raw, from_cache) in zip(files, downloads):
         if raw is None or not len(raw):
             continue
         df = _standardize(raw, *cols)

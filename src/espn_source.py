@@ -31,7 +31,7 @@ import pandas as pd
 import requests
 
 from src.match_model import PredictionError, SourceInfo
-from src.utils import write_atomic
+from src.utils import CONNECT_TIMEOUT_S, write_atomic
 
 ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) football-predictor-macho"}
@@ -142,7 +142,7 @@ def _get_events(session: requests.Session, slug: str, params: dict) -> list[dict
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            resp = session.get(url, params=params, headers=HTTP_HEADERS, timeout=60)
+            resp = session.get(url, params=params, headers=HTTP_HEADERS, timeout=(CONNECT_TIMEOUT_S, 60))
             resp.raise_for_status()
             return resp.json().get("events", [])
         except (requests.RequestException, ValueError) as exc:
@@ -185,7 +185,7 @@ def _summary(session: requests.Session, slug: str, event_id: str) -> dict:
     url = f"{ESPN}/{slug}/summary"
     for attempt in range(3):
         try:
-            resp = session.get(url, params={"event": event_id}, headers=HTTP_HEADERS, timeout=30)
+            resp = session.get(url, params={"event": event_id}, headers=HTTP_HEADERS, timeout=(CONNECT_TIMEOUT_S, 30))
             resp.raise_for_status()
             return resp.json()
         except (requests.RequestException, ValueError):

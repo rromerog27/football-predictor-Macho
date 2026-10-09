@@ -21,6 +21,12 @@ MIN_MATCHES_FOR_ML_MODEL = 100
 
 INSUFFICIENT_DATA_LABEL = "Datos insuficientes"
 
+# Espera máxima para conectar con una fuente de datos (ESPN, Understat, football-data). Conectar
+# tarda menos de un segundo; a veces la conexión queda colgada ~30 s, y es mucho más rápido
+# reintentar que esperarla. La espera de lectura (segundo valor de `timeout`) sigue siendo larga:
+# los archivos de una temporada pesan varios MB.
+CONNECT_TIMEOUT_S = 6
+
 # Orden fijo de las clases de resultado (Away/Draw/Home) usado de forma
 # consistente por poisson_model.py y prediction_model.py, para que sus
 # métricas de validación (log loss, matriz de confusión) sean comparables.
