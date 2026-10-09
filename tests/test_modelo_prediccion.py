@@ -256,8 +256,10 @@ def test_predict_match_end_to_end(trained_league):
 
     pred = mm.predict_match(trained_league, "team0", "Team11")
     assert pred.p_final.sum() == pytest.approx(1.0)
-    np.testing.assert_allclose(pred.p_final, pred.p_poisson)  # sin alineaciones, el 1X2 final es el de Poisson
-    assert pred.over25 == pytest.approx(pred.over25_poisson) and pred.p_before_lineups is None
+    # sin alineaciones, el 1X2 final es el de Poisson con el favorito calibrado
+    np.testing.assert_allclose(pred.p_final, mm.calibrate_favorite(pred.p_poisson))
+    np.testing.assert_allclose(pred.p_model, pred.p_final)
+    assert 0 < pred.over25 < 1 and pred.p_before_lineups is None
     assert pred.p_final[0] > pred.p_final[2]  # Team0 es el más fuerte de la liga sintética
     assert pred.lam_home > pred.lam_away
     assert pred.final_score is None and pred.market is None and not pred.low_data
@@ -290,6 +292,21 @@ def test_predict_played_fixture_reports_result_and_ignores_it(trained_league):
     pred = mm.predict_match(trained_league, played["home"], played["away"], fixture=played)
     assert pred.final_score == (int(played["hg"]), int(played["ag"]))
     assert (pred.home_snap["recent_rows"]["datetime"] < played["datetime"]).all()
+
+
+def test_calibrate_favorite_only_stretches_clear_favorites():
+    even = np.array([0.45, 0.30, 0.25])
+    np.testing.assert_allclose(mm.calibrate_favorite(even), even)  # nadie pasa del umbral: sin cambios
+    fav = np.array([0.15, 0.25, 0.60])
+    q = mm.calibrate_favorite(fav)
+    assert q.sum() == pytest.approx(1.0) and q[2] > fav[2]
+    assert q[0] / q[1] == pytest.approx(fav[0] / fav[1])  # el resto se reparte en proporción
+    strong = mm.calibrate_favorite(np.array([0.80, 0.12, 0.08]))
+    assert strong[0] > q[2] and strong[0] < 1  # más estirado cuanto más claro, sin llegar a 1
+    rows = mm.calibrate_favorite(np.vstack([even, fav]))  # también por filas
+    np.testing.assert_allclose(rows, np.vstack([even, q]))
+    at_threshold = np.array([mm.FAVORITE_THRESHOLD, 0.25, 0.75 - mm.FAVORITE_THRESHOLD])
+    np.testing.assert_allclose(mm.calibrate_favorite(at_threshold), at_threshold)  # continuo en el umbral
 
 
 def test_cli_report_has_required_sections(trained_league):
