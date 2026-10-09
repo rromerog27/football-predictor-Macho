@@ -121,7 +121,7 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
 .pd-hl-team { display: flex; align-items: center; gap: 8px; font-size: .88rem; font-weight: 700; min-width: 0; }
 .pd-hl-team span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pd-hl-main { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; min-width: 0; }
-.pd-hl-main b { font-size: 1.45rem; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.pd-hl-main b { font-size: 1.45rem; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pd-hl-main span { font-size: .78rem; color: var(--fc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pd-hl-foot { font-size: .72rem; color: var(--fc-muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
 
@@ -661,8 +661,8 @@ def _highlight_items(items: list[DayItem], kind: str) -> list[tuple[DayItem, str
     elif kind == "Más parejos":
         for it in sorted(pending, key=lambda it: it.pred.p_final.max())[:N_HIGHLIGHTS]:
             p = it.pred.p_final
-            out.append((it, " · ".join(f"{x * 100:.0f}" for x in p), "1 · X · 2: ningún resultado pasa del "
-                        f"{p.max() * 100:.0f}%", ""))
+            out.append((it, _pct(p.max()), "como máximo",
+                        " · ".join(f"{s} {_pct(x)}" for s, x in zip(("1", "X", "2"), p))))
     elif kind == "Vs mercado":
         edges = [(it, _value_edge(it.pred)) for it in pending if it.pred.market]
         for it, (k, d) in sorted(edges, key=lambda x: -x[1][1])[:N_HIGHLIGHTS]:
