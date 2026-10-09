@@ -29,6 +29,7 @@ import streamlit as st
 
 from src import backtest
 from src import competitions as comps
+from src import espn_source
 from src import football_data_source as fd
 from src import lineups
 from src import match_model as mm
@@ -175,6 +176,37 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
   color: var(--fc-faint); }
 .pd-pick-grid b { font-size: .98rem; font-weight: 800; color: var(--fc-text); font-variant-numeric: tabular-nums; }
 
+/* -- Analizar: escudos grandes, cara a cara, últimos partidos e historial entre ellos -- */
+.pd-crest.lg { width: 32px; height: 32px; }
+.pd-crest.lg::before, span.pd-crest.lg { font-size: .7rem; }
+.pd-team-name.crested { display: flex; align-items: center; gap: 10px; }
+.pd-team.away .pd-team-name.crested { flex-direction: row-reverse; }
+.pd-cmp-head, .pd-cmp-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1fr);
+  align-items: center; gap: 10px; }
+.pd-cmp-head { padding-bottom: 10px; border-bottom: 1px solid var(--fc-border); font-size: .84rem; font-weight: 800;
+  color: var(--fc-text); }
+.pd-cmp-head > span { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pd-cmp-head > span:last-child { flex-direction: row-reverse; text-align: right; }
+.pd-cmp-head b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-cmp-row { padding: 7px 0; border-bottom: 1px solid var(--fc-border); font-variant-numeric: tabular-nums; }
+.pd-cmp-row:last-child { border-bottom: none; }
+.pd-cmp-l { text-align: center; font-size: .74rem; color: var(--fc-muted); line-height: 1.3; }
+.pd-cmp-v { font-size: .92rem; color: var(--fc-muted); }
+.pd-cmp-v:last-child { text-align: right; }
+.pd-cmp-v.best { color: var(--fc-text); font-weight: 800; }
+.pd-rec-title { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--fc-border);
+  font-size: .86rem; font-weight: 800; color: var(--fc-text); }
+.pd-rec-title small { font-weight: 500; color: var(--fc-muted); }
+.pd-rec-row { display: grid; grid-template-columns: 68px 22px minmax(0, 1fr) 62px 72px; gap: 8px; align-items: center;
+  padding: 7px 14px; border-bottom: 1px solid var(--fc-border); font-size: .82rem; color: var(--fc-text); }
+.pd-rec-row:last-child { border-bottom: none; }
+.pd-rec-row.head { font-size: .64rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--fc-faint);
+  padding-top: 6px; padding-bottom: 6px; background: var(--fc-surface-2); white-space: nowrap; }
+.pd-rec-venue { font-size: .7rem; font-weight: 700; color: var(--fc-muted); text-align: center; }
+.pd-rec-opp { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-rec-res { display: flex; align-items: center; gap: 6px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pd-rec-xg { text-align: right; color: var(--fc-muted); font-variant-numeric: tabular-nums; }
+
 /* -- Historial: últimos partidos con el pronóstico y si acertó -- */
 .pd-hist { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
   box-shadow: var(--fc-shadow); overflow: hidden; }
@@ -281,8 +313,11 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
   .pd-kpi-value { font-size: 1.45rem; }
   .pd-hist-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "date res" "match match" "pick pick";
     gap: 4px 10px; padding: 10px 14px; }
-  .pd-hist-match { grid-area: match; } .pd-hist-res { grid-area: res; }
-  .pd-hist-date { grid-area: date; } .pd-hist-pick { grid-area: pick; justify-self: start; max-width: 100%; }
+  .pd-hist-row > .pd-hist-match { grid-area: match; } .pd-hist-row > .pd-hist-res { grid-area: res; }
+  .pd-hist-row > .pd-hist-date { grid-area: date; }
+  .pd-hist-row > .pd-hist-pick { grid-area: pick; justify-self: start; max-width: 100%; }
+  .pd-rec-row { grid-template-columns: 58px 14px minmax(0, 1fr) 56px 54px; gap: 6px; padding: 7px 12px; font-size: .8rem; }
+  .pd-rec-row .pd-hist-date { font-size: .72rem; }
   .st-key-pd_view button { padding-left: 10px; padding-right: 10px; }
   .st-key-pd_view button p { font-size: .88rem; }
   .pd-cols { display: none; }
@@ -486,7 +521,8 @@ def _lineup_html(pred: mm.MatchPrediction) -> str:
             f"→ {moved}</div>")
 
 
-def _card_summary_html(pred: mm.MatchPrediction, tz: str, show_date: bool = False) -> str:
+def _card_summary_html(pred: mm.MatchPrediction, tz: str, show_date: bool = False,
+                       crest_ids: tuple[str | None, str | None] | None = None) -> str:
     if pred.kickoff is None:
         when = f"Datos al {_local(pred.cutoff, tz):%d/%m}"
     else:
@@ -495,6 +531,13 @@ def _card_summary_html(pred: mm.MatchPrediction, tz: str, show_date: bool = Fals
     middle = (f"<div class='pd-score'>{pred.final_score[0]} - {pred.final_score[1]}</div>"
               if pred.final_score else "<div class='pd-vs'>vs</div>")
     i, j, p = pred.top_scores[0]
+
+    def team_name(name: str, side: int) -> str:
+        if crest_ids is None:
+            return f"<div class='pd-team-name'>{_esc(name)}</div>"
+        crest = _crest(crest_ids[side], name).replace("class='pd-crest'", "class='pd-crest lg'")
+        return f"<div class='pd-team-name crested'>{crest}<span>{_esc(name)}</span></div>"
+
     warn = ""
     if pred.low_data:
         few = min(pred.home_snap["n_window"], pred.away_snap["n_window"])
@@ -507,10 +550,10 @@ def _card_summary_html(pred: mm.MatchPrediction, tz: str, show_date: bool = Fals
     return (
         f"<div class='pd-top'><span class='pd-time'>{_esc(when)}</span>{_pick_pill(pred)}</div>"
         "<div class='pd-teams'>"
-        f"<div class='pd-team'><div class='pd-team-name'>{_esc(pred.home)}</div>"
+        f"<div class='pd-team'>{team_name(pred.home, 0)}"
         f"<div class='pd-team-xg' title='Goles esperados por el modelo'>λ {pred.lam_home:.2f}</div></div>"
         f"{middle}"
-        f"<div class='pd-team away'><div class='pd-team-name'>{_esc(pred.away)}</div>"
+        f"<div class='pd-team away'>{team_name(pred.away, 1)}"
         f"<div class='pd-team-xg' title='Goles esperados por el modelo'>λ {pred.lam_away:.2f}</div></div>"
         "</div>"
         f"{_bar_html(pred)}"
@@ -524,14 +567,41 @@ def _card_summary_html(pred: mm.MatchPrediction, tz: str, show_date: bool = Fals
     )
 
 
+def _model_table_html(pred: mm.MatchPrediction) -> str:
+    """Modelo, Poisson sin calibrar (si cambia), con alineaciones y mercado: 1X2 de cada uno."""
+    def row(name: str, probs) -> str:
+        return f"<tr><td>{name}</td>" + "".join(f"<td>{p * 100:.1f}%</td>" for p in probs) + "</tr>"
+
+    market_row = row("Mercado", pred.market["p_1x2"]) if pred.market else ""
+    lineup_row = row("Con alineaciones", pred.p_final) if pred.lineups is not None else ""
+    calibrated = max(abs(pred.p_model - pred.p_poisson)) >= 0.005
+    poisson_row = row("Poisson sin calibrar", pred.p_poisson) if calibrated else ""
+    return ("<table><tr><th>Modelo</th><th>1</th><th>X</th><th>2</th></tr>"
+            f"{row('Modelo', pred.p_model)}{poisson_row}{lineup_row}{market_row}</table>")
+
+
+def _model_footer_html(pred: mm.MatchPrediction) -> str:
+    """Alineaciones, marcadores más probables, Over/Under, ambos anotan y enlace al partido."""
+    scores = " · ".join(f"{i}-{j} ({p * 100:.1f}%)" for i, j, p in pred.top_scores)
+    over_market = (f" · mercado {pred.market['over25'] * 100:.1f}%"
+                   if pred.market and pred.market["over25"] is not None else "")
+    url = comps.match_url(pred.match_id)
+    link = f"<div style='margin-top:6px'><a href='{url}' target='_blank' rel='noopener'>Ver partido ↗</a></div>" if url else ""
+    lineup_note = ""
+    if pred.lineups is not None:
+        parts = [f"{_esc(name)}: {_esc(', '.join(team.missing)) if team.missing else _rotation_text(team)}"
+                 for name, team in ((pred.home, pred.lineups.home), (pred.away, pred.lineups.away))]
+        lineup_note = f"<div><b>Habituales que no son titulares:</b> {' · '.join(parts)}</div>"
+    return (f"{lineup_note}<div><b>Marcadores más probables:</b> {scores}</div>"
+            f"<div><b>Over 2.5:</b> modelo {pred.over25 * 100:.1f}%"
+            f"{over_market} · <b>Ambos anotan:</b> {pred.btts * 100:.1f}%</div>{link}")
+
+
 def _detail_html(pred: mm.MatchPrediction) -> str:
     h, a = pred.home_snap, pred.away_snap
     att_h, def_h = pred.attack_defense("home")
     att_a, def_a = pred.attack_defense("away")
     signal = pred.signal_short
-
-    def row(name: str, probs) -> str:
-        return f"<tr><td>{name}</td>" + "".join(f"<td>{p * 100:.1f}%</td>" for p in probs) + "</tr>"
 
     def team_block(name: str, snap: dict, att: float, dfn: float, venue: str) -> str:
         recent = snap["recent_rows"]
@@ -550,38 +620,20 @@ def _detail_html(pred: mm.MatchPrediction) -> str:
                 f"{snap['rest_days']:.0f} d de descanso</span>"
                 "</div></div>")
 
-    market_row = row("Mercado", pred.market["p_1x2"]) if pred.market else ""
-    scores = " · ".join(f"{i}-{j} ({p * 100:.1f}%)" for i, j, p in pred.top_scores)
-    over_market = (f" · mercado {pred.market['over25'] * 100:.1f}%"
-                   if pred.market and pred.market["over25"] is not None else "")
-    url = comps.match_url(pred.match_id)
-    link = f"<a href='{url}' target='_blank' rel='noopener'>Ver partido ↗</a>" if url else ""
-    lineup_row = row("Con alineaciones", pred.p_final) if pred.lineups is not None else ""
-    calibrated = max(abs(pred.p_model - pred.p_poisson)) >= 0.005
-    poisson_row = row("Poisson sin calibrar", pred.p_poisson) if calibrated else ""
-    lineup_note = ""
-    if pred.lineups is not None:
-        parts = [f"{_esc(name)}: {_esc(', '.join(team.missing)) if team.missing else _rotation_text(team)}"
-                 for name, team in ((pred.home, pred.lineups.home), (pred.away, pred.lineups.away))]
-        lineup_note = f"<div><b>Habituales que no son titulares:</b> {' · '.join(parts)}</div>"
     return (
         "<div class='pd-detail'>"
-        "<table><tr><th>Modelo</th><th>1</th><th>X</th><th>2</th></tr>"
-        f"{row('Modelo', pred.p_model)}{poisson_row}{lineup_row}{market_row}</table>"
+        f"{_model_table_html(pred)}"
         f"{team_block(pred.home, h, att_h, def_h, 'en casa')}"
         f"{team_block(pred.away, a, att_a, def_a, 'fuera')}"
-        f"{lineup_note}<div><b>Marcadores más probables:</b> {scores}</div>"
-        f"<div><b>Over 2.5:</b> modelo {pred.over25 * 100:.1f}%"
-        f"{over_market} · <b>Ambos anotan:</b> {pred.btts * 100:.1f}%</div>"
-        f"<div style='margin-top:6px'>{link}</div>"
+        f"{_model_footer_html(pred)}"
         "</div>"
     )
 
 
 def _match_card(pred: mm.MatchPrediction, tz: str, key: str, show_date: bool = False,
-                with_detail: bool = True) -> None:
+                with_detail: bool = True, crest_ids: tuple[str | None, str | None] | None = None) -> None:
     with st.container(key=f"pd_card_{key}"):
-        st.markdown(_card_summary_html(pred, tz, show_date), unsafe_allow_html=True)
+        st.markdown(_card_summary_html(pred, tz, show_date, crest_ids), unsafe_allow_html=True)
         if with_detail:
             with st.expander("Ver análisis"):
                 st.markdown(_detail_html(pred), unsafe_allow_html=True)
@@ -782,20 +834,6 @@ def _long_date(day: date) -> str:
 
 def _safe_key(text: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in str(text))
-
-
-def _recent_table(snap: dict, signal: str) -> pd.DataFrame:
-    rows = snap["recent_rows"].iloc[::-1]
-    return pd.DataFrame(
-        {
-            "Fecha": rows["datetime"].dt.strftime("%Y-%m-%d"),
-            "Sede": rows["venue"].map({"h": "Local", "a": "Visitante"}),
-            "Rival": rows["opp"],
-            "Resultado": [f"{int(g)}-{int(c)}" for g, c in zip(rows["gf"], rows["ga"])],
-            f"{signal} F": rows["sf"].round(2),
-            f"{signal} C": rows["sa"].round(2),
-        }
-    )
 
 
 def _validation_table(models: dict[str, mm.LeagueModel]) -> pd.DataFrame:
@@ -1140,6 +1178,110 @@ def section_picks(tz: str) -> None:
             st.markdown(_record_html(record.head(40), tz), unsafe_allow_html=True)
 
 
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def _espn_team_ids(code: str) -> dict[str, str]:
+    """Nombre de ESPN → id de equipo (para los escudos), del listado de equipos de la competición."""
+    try:
+        resp = requests.get(f"{espn_source.ESPN}/{code}/teams", headers=espn_source.HTTP_HEADERS, timeout=(6, 20))
+        resp.raise_for_status()
+        teams = resp.json()["sports"][0]["leagues"][0]["teams"]
+    except (requests.RequestException, ValueError, KeyError, IndexError):
+        return {}
+    out = {}
+    for entry in teams:
+        team = entry.get("team") or {}
+        for name in (team.get("displayName"), team.get("shortDisplayName")):
+            if name and team.get("id"):
+                out[name] = str(team["id"])
+    return out
+
+
+def _team_crest_id(code: str, data: mm.LeagueData, team: str) -> str | None:
+    """Id de ESPN del equipo: de los propios partidos (ligas de ESPN) o, si no hay (Understat), del listado
+    de equipos de ESPN por nombre parecido (0.85 o más)."""
+    m = data.matches
+    for side in ("home", "away"):
+        if f"{side}_id" in m:
+            ids = m.loc[m[side] == team, f"{side}_id"].dropna()
+            if len(ids):
+                return str(ids.iloc[-1])
+    names = _espn_team_ids(code)
+    if not names:
+        return None
+    best = max(names, key=lambda n: mm.team_similarity(team, n))
+    return names[best] if mm.team_similarity(team, best) >= 0.85 else None
+
+
+def _compare_html(pred: mm.MatchPrediction, crest_ids: tuple[str | None, str | None]) -> str:
+    """Los dos equipos enfrentados, dato por dato; en negrita el mejor de cada fila."""
+    h, a = pred.home_snap, pred.away_snap
+    rh, ra = h["recent_rows"], a["recent_rows"]
+    att_h, def_h = pred.attack_defense("home")
+    att_a, def_a = pred.attack_defense("away")
+    sig = pred.signal_short
+    rows = [("Ataque (1.00 = media)", att_h, att_a, True, "{:.2f}"),
+            ("Defensa (menos es mejor)", def_h, def_a, False, "{:.2f}")]
+    if pred.signal_name != "goles":
+        rows += [(f"{sig} a favor", rh["sf"].mean(), ra["sf"].mean(), True, "{:.2f}"),
+                 (f"{sig} en contra", rh["sa"].mean(), ra["sa"].mean(), False, "{:.2f}")]
+    rows += [("Goles a favor", rh["gf"].mean(), ra["gf"].mean(), True, "{:.2f}"),
+             ("Goles en contra", rh["ga"].mean(), ra["ga"].mean(), False, "{:.2f}"),
+             ("Puntos, últimos 5", h["form_rows"]["pts"].sum(), a["form_rows"]["pts"].sum(), True, "{:.0f}"),
+             ("Puntos de local / visitante", h["venue_rows"]["pts"].sum(), a["venue_rows"]["pts"].sum(), True, "{:.0f}"),
+             ("Días de descanso", h["rest_days"], a["rest_days"], None, "{:.0f}")]
+    html = ["<div class='pd-card'><div class='pd-cmp-head'>"
+            f"<span>{_crest(crest_ids[0], pred.home)}<b>{_esc(pred.home)}</b></span>"
+            f"<span class='pd-cmp-l'>últimos {len(rh)} / {len(ra)} partidos</span>"
+            f"<span>{_crest(crest_ids[1], pred.away)}<b>{_esc(pred.away)}</b></span></div>"]
+    html.append("<div class='pd-cmp-row'>" + f"<span class='pd-cmp-v'>{_form_html(h['form_rows'])}</span>"
+                "<span class='pd-cmp-l'>Racha</span>" + f"<span class='pd-cmp-v'>{_form_html(a['form_rows'])}</span></div>")
+    for label, vh, va, higher, fmt in rows:
+        best_h = higher is not None and (vh > va if higher else vh < va)
+        best_a = higher is not None and (va > vh if higher else va < vh)
+        html.append("<div class='pd-cmp-row'>"
+                    f"<span class='pd-cmp-v{' best' if best_h else ''}'>{fmt.format(vh)}</span>"
+                    f"<span class='pd-cmp-l'>{_esc(label)}</span>"
+                    f"<span class='pd-cmp-v{' best' if best_a else ''}'>{fmt.format(va)}</span></div>")
+    return "".join(html) + "</div>"
+
+
+def _recent_html(name: str, crest_id: str | None, snap: dict, pred: mm.MatchPrediction, tz: str) -> str:
+    rows = snap["recent_rows"].iloc[::-1]
+    sig = pred.signal_short if pred.signal_name != "goles" else None
+    head = (f"<div class='pd-rec-row head'><span>Fecha</span><span></span><span>Rival</span><span>Res.</span>"
+            f"<span style='text-align:right'>{_esc(sig) if sig else ''}</span></div>")
+    items = []
+    for r in rows.itertuples():
+        letter = "G" if r.gf > r.ga else ("E" if r.gf == r.ga else "P")
+        xg = f"{r.sf:.1f}–{r.sa:.1f}" if sig and pd.notna(r.sf) and pd.notna(r.sa) else ""
+        venue = "L" if r.venue == "h" else "V"
+        items.append(f"<div class='pd-rec-row'><span class='pd-hist-date'>{_short_date(r.datetime, tz)}</span>"
+                     f"<span class='pd-rec-venue' title='{'Local' if venue == 'L' else 'Visitante'}'>{venue}</span>"
+                     f"<span class='pd-rec-opp'>{_esc(r.opp)}</span>"
+                     f"<span class='pd-rec-res'><span class='pd-form'><i class='{letter}'>{letter}</i></span>"
+                     f"{int(r.gf)}-{int(r.ga)}</span><span class='pd-rec-xg'>{xg}</span></div>")
+    return (f"<div class='pd-hist'><div class='pd-rec-title'>{_crest(crest_id, name)}{_esc(name)}"
+            f"<small>· últimos {len(rows)}</small></div>{head}{''.join(items)}</div>")
+
+
+def _h2h_html(data: mm.LeagueData, home: str, away: str, tz: str, limit: int = 6) -> str:
+    m = data.matches
+    both = m[m["played"] & (((m["home"] == home) & (m["away"] == away)) | ((m["home"] == away) & (m["away"] == home)))]
+    both = both.sort_values("datetime", ascending=False).head(limit)
+    if both.empty:
+        return ("<div class='pd-empty'>No se enfrentaron en los datos descargados (las últimas temporadas de esta "
+                "competición).</div>")
+    rows = []
+    for r in both.itertuples():
+        d = _local(r.datetime, tz)
+        comp = comps.BY_CODE[r.competition].name if r.competition in comps.BY_CODE else r.competition
+        rows.append(f"<div class='pd-hist-row'><span class='pd-hist-date'>{d.day} {MONTHS_SHORT[d.month - 1]} {d.year}"
+                    f"</span><span class='pd-hist-match'>{_esc(r.home)}<span class='sc'>{int(r.hg)}-{int(r.ag)}</span>"
+                    f"{_esc(r.away)}</span><span class='pd-hist-pick'><span class='pd-pill'>{_esc(comp)}</span></span>"
+                    "<span class='pd-hist-res'></span></div>")
+    return f"<div class='pd-hist'>{''.join(rows)}</div>"
+
+
 def section_manual(tz: str) -> None:
     with st.container(key="pd_manual_form"):
         code = st.selectbox("Liga o copa", ORDERED_CODES, key="pd_m_code",
@@ -1174,19 +1316,25 @@ def section_manual(tz: str) -> None:
     except mm.PredictionError as exc:
         st.warning(str(exc))
         return
+    crest_ids = (_team_crest_id(code, model.data, pred.home), _team_crest_id(code, model.data, pred.away))
 
-    left, right = st.columns([1, 1.2])
+    _match_card(pred, tz, key="manual", show_date=True, with_detail=False, crest_ids=crest_ids)
+    left, right = st.columns([1.1, 1])
     with left:
-        _match_card(pred, tz, key="manual", show_date=True, with_detail=False)
+        _section_title("Cara a cara")
+        st.markdown(_compare_html(pred, crest_ids), unsafe_allow_html=True)
     with right:
-        st.markdown(_detail_html(pred), unsafe_allow_html=True)
-    signal = pred.signal_short
+        _section_title("Modelo y mercado")
+        st.markdown(f"<div class='pd-card pd-detail'>{_model_table_html(pred)}{_model_footer_html(pred)}</div>",
+                    unsafe_allow_html=True)
+    _section_title("Últimos partidos", "L = local · V = visitante")
     c1, c2 = st.columns(2)
-    for col, name, snap in ((c1, pred.home, pred.home_snap), (c2, pred.away, pred.away_snap)):
+    for col, name, snap, cid in ((c1, pred.home, pred.home_snap, crest_ids[0]),
+                                 (c2, pred.away, pred.away_snap, crest_ids[1])):
         with col:
-            st.markdown(f"<div class='pd-label'>{_esc(name)} · últimos {snap['n_recent']} partidos</div>",
-                        unsafe_allow_html=True)
-            st.dataframe(_recent_table(snap, signal), hide_index=True, width="stretch")
+            st.markdown(_recent_html(name, cid, snap, pred, tz), unsafe_allow_html=True)
+    _section_title("Entre ellos", "Últimos enfrentamientos en los datos")
+    st.markdown(_h2h_html(model.data, pred.home, pred.away, tz), unsafe_allow_html=True)
 
 
 def _backtest_row(code: str, r: backtest.BacktestResult) -> dict:
