@@ -20,13 +20,16 @@ from dataclasses import dataclass
 import pandas as pd
 import requests
 
-from src import espn_source, market_signal, understat_source
+from src import espn_source, lineups, market_signal, understat_source
 from src import football_data_source as fd
 from src.match_model import (
     STANDARD_COLUMNS,
     LeagueData,
+    LeagueModel,
+    MatchPrediction,
     PredictionError,
     build_league_data,
+    predict_match,
     normalize,
     team_similarity,
     utc_now,
@@ -288,7 +291,7 @@ def match_to_source(espn_rows: pd.DataFrame, source_rows: pd.DataFrame,
 
 def fixture_rows_for_model(comp: Competition, data: LeagueData, espn_day: pd.DataFrame) -> pd.DataFrame:
     """Partidos del día listos para `predict_match`: en ligas de ESPN, las filas de ESPN;
-    en las de Understat, la fila de Understat (equipos con su nombre) con las cuotas de ESPN.
+    en las de Understat, la fila de Understat (equipos con su nombre) con las cuotas y los ids de ESPN.
     Los partidos de ESPN que no se emparejan se devuelven con su nombre de ESPN."""
     if not comp.understat:
         return espn_day
@@ -301,6 +304,8 @@ def fixture_rows_for_model(comp: Competition, data: LeagueData, espn_day: pd.Dat
             row = us[us["id"] == pairs[e.id]].iloc[0].copy()
             for col in odds_cols:
                 row[col] = getattr(e, col)
+            # ids de ESPN para consultar las alineaciones del partido
+            row["espn_id"], row["espn_home_id"], row["espn_away_id"] = e.id, e.home_id, e.away_id
             rows.append(row)
         else:
             rows.append(pd.Series(e._asdict()))
@@ -332,6 +337,23 @@ def understat_fixture_with_odds(comp: Competition, data: LeagueData, match_id: s
     rows = fixture_rows_for_model(comp, data, day)
     match = rows[rows["id"] == match_id]
     return match.iloc[0] if len(match) else None
+
+
+def predict_fixture(comp: Competition, model: LeagueModel, home: str, away: str) -> MatchPrediction:
+    """`predict_match` con el contexto del partido del calendario (próximos días): las cuotas de ESPN
+    en las ligas de Understat y, si ESPN ya publicó las alineaciones, el ajuste por rotaciones."""
+    pred = predict_match(model, home, away)
+    if pred.match_id is None:
+        return pred
+    if comp.understat:
+        fixture = understat_fixture_with_odds(comp, model.data, pred.match_id)
+    else:
+        rows = model.data.focus_matches[model.data.focus_matches["id"] == pred.match_id]
+        fixture = rows.iloc[0] if len(rows) else None
+    if fixture is None:
+        return pred
+    lineup = lineups.fixture_lineups(comp.code, comp.is_cup, fixture)
+    return predict_match(model, pred.home, pred.away, fixture=fixture, lineups=lineup)
 
 
 def coverage_note(comp: Competition, data: LeagueData) -> str:

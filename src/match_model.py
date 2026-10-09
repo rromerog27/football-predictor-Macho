@@ -503,6 +503,16 @@ def reweight_matrix(matrix: np.ndarray, target: np.ndarray) -> np.ndarray:
     return matrix * factor
 
 
+def shift_home_away(p: np.ndarray, shift: float) -> np.ndarray:
+    """1X2 con el log-odds local/visitante desplazado `shift` a favor del visitante (el empate se
+    reparte solo al renormalizar)."""
+    lp = np.log(np.clip(np.asarray(p, float), 1e-12, 1.0))
+    lp[0] -= shift
+    lp[2] += shift
+    q = np.exp(lp)
+    return q / q.sum()
+
+
 def top_scores(matrix: np.ndarray, k: int = 3) -> list[tuple[int, int, float]]:
     flat = np.argsort(matrix, axis=None)[::-1][:k]
     return [(int(i), int(j), float(matrix[i, j])) for i, j in zip(*np.unravel_index(flat, matrix.shape))]
@@ -978,6 +988,8 @@ class MatchPrediction:
     signal_name: str = "xG"  # señal de calidad de ocasiones de la competición
     base_home: float = float("nan")  # goles medios esperados del local de la competición (con su calibración)
     base_away: float = float("nan")
+    lineups: object | None = field(default=None, repr=False)  # src.lineups.LineupInfo si se aplicaron
+    p_before_lineups: np.ndarray | None = None  # 1X2 final antes del ajuste por alineaciones
 
     @property
     def signal_short(self) -> str:
@@ -1014,10 +1026,11 @@ def find_fixture(data: LeagueData, home: str, away: str, now: pd.Timestamp | Non
 
 
 def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp | None = None,
-                  fixture: pd.Series | None = None, url: str | None = None) -> MatchPrediction:
+                  fixture: pd.Series | None = None, url: str | None = None, lineups=None) -> MatchPrediction:
     """Predice home-away con los datos anteriores a `cutoff`. Si se pasa el
     `fixture` (fila de partidos estándar), el corte es su hora de inicio y se
-    usan su campo neutral y sus cuotas."""
+    usan su campo neutral y sus cuotas. `lineups` (src.lineups.LineupInfo): ajusta el 1X2
+    final por las rotaciones de los titulares."""
     data, t = model.data, model.trained
     teams = sorted(set(data.teams) | set(data.index.team_rows))
     home = resolve_team(home, teams)
@@ -1050,6 +1063,9 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
                                 p_poisson[None, :])
     p_logistic = predict_hda(t.logistic, features)[0]
     p_final = t.w_poisson * p_poisson + (1 - t.w_poisson) * p_logistic
+    p_before_lineups = None
+    if lineups is not None:
+        p_before_lineups, p_final = p_final, shift_home_away(p_final, lineups.shift)
     over25, btts = goal_markets(reweight_matrix(matrix, p_final))
     over25_poisson, btts_poisson = goal_markets(matrix)
 
@@ -1084,6 +1100,8 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
         signal_name=data.signal_name,
         base_home=float(base_h) * kh,
         base_away=float(base_a) * ka,
+        lineups=lineups,
+        p_before_lineups=p_before_lineups,
     )
 
 

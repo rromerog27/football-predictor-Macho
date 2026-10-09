@@ -5,8 +5,9 @@ Script de terminal sobre `src/match_model.py` y `src/competitions.py` (el mismo
 modelo que usa la página "Partidos del día" de la app). Usa xG real de
 Understat en las 6 ligas que cubre y, en el resto de ligas y copas, el xG
 aproximado con tiros de ESPN; donde hay cuotas de cierre de partidos anteriores
-(football-data.co.uk o ESPN), también la fuerza que les da el mercado. Ver el
-README para la descripción del modelo.
+(football-data.co.uk o ESPN), también la fuerza que les da el mercado; y, desde
+~1 h antes del partido, las alineaciones (rotaciones). Ver el README para la
+descripción del modelo.
 
 Uso:
     python3 modelo_prediccion.py "Arsenal" "Leeds" --liga "Premier League"
@@ -22,6 +23,7 @@ import sys
 
 from src import backtest
 from src import competitions as comps
+from src import lineups
 from src import match_model as mm
 
 SEP = "=" * 50
@@ -63,6 +65,25 @@ def detail_lines(name: str, snap: dict) -> list[str]:
             f"{int(r.gf)}-{int(r.ga)} | {r.sf:.2f}-{r.sa:.2f}"
         )
     return lines
+
+
+def lineup_lines(pred: mm.MatchPrediction) -> list[str]:
+    """Sección de alineaciones confirmadas (vacía si ESPN aún no las publica o no aplican)."""
+    lu = pred.lineups
+    if lu is None:
+        return []
+    out = [SEP, "👥 ALINEACIONES CONFIRMADAS (ESPN)"]
+    for name, team in ((pred.home, lu.home), (pred.away, lu.away)):
+        if team.rotation is None:
+            out.append(f"- {name}: menos de {lineups.MIN_PREVIOUS} partidos previos con alineación → sin ajuste")
+        else:
+            missing = ", ".join(team.missing) if team.missing else "ninguno"
+            out.append(f"- {name}: rotación {team.rotation:.0%} (habituales de sus últimos {team.n_previous} partidos "
+                       f"que no son titulares: {missing})")
+    before, after = pred.p_before_lineups, pred.p_final
+    out.append(f"- Ajuste del 1X2: Local {pct(before[0])} → {pct(after[0])} | Empate {pct(before[1])} → "
+               f"{pct(after[1])} | Visitante {pct(before[2])} → {pct(after[2])}")
+    return out
 
 
 def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
@@ -112,7 +133,8 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
         f"   ·   {pred.away}: ataque {att_a:.2f} | defensa {def_a:.2f}",
         f"- Goles medios de la competición (12 meses): local {pred.base_home:.2f} / visitante {pred.base_away:.2f}",
         f"- Goles esperados del partido: λ local {pred.lam_home:.2f} | λ visitante {pred.lam_away:.2f}",
-        "- Bajas/lesiones del partido: no incluidas (solo de forma indirecta, vía las cuotas de partidos anteriores).",
+        "- Bajas/lesiones del partido: solo a través de las alineaciones, cuando ESPN las publica (~1 h antes), y "
+        "de forma indirecta vía las cuotas de partidos anteriores.",
         "- Descanso: calculado solo con los partidos de las competiciones descargadas.",
         SEP,
         "🧮 RESULTADOS DE LOS MODELOS (POISSON & LOGÍSTICO)",
@@ -128,9 +150,11 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
         f"Ensemble {t.ll_ensemble:.4f}"
         + (f" | solo {data.name}: {t.ll_ensemble_focus:.4f} ({t.n_val_focus} partidos)"
            if t.ll_ensemble_focus is not None else ""),
+        *lineup_lines(pred),
         SEP,
         "🎯 PREDICCIÓN FINAL COMBINADA (ENSEMBLE MODEL)",
-        f"- Pesos: Poisson {t.w_poisson:.0%} | Logística {1 - t.w_poisson:.0%} (mínimo log loss de validación)",
+        f"- Pesos: Poisson {t.w_poisson:.0%} | Logística {1 - t.w_poisson:.0%} (mínimo log loss de validación)"
+        + (" · con el ajuste por alineaciones" if pred.lineups is not None else ""),
         f"- Mercado 1X2: Local {pct(pred.p_final[0])} | Empate {pct(pred.p_final[1])} | "
         f"Visitante {pct(pred.p_final[2])}",
         f"- Línea de Goles: Over 2.5 {pct(pred.over25)} | Under 2.5 {pct(1 - pred.over25)}",
@@ -200,11 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         data = comps.load_competition(comp, args.refrescar, progress=log)
         log("Construyendo histórico pre-partido y entrenando modelos...")
         model = mm.train_league(data)
-        pred = mm.predict_match(model, args.local, args.visitante)
-        if comp.understat and pred.match_id is not None:  # cuotas de ESPN para el partido de Understat
-            fixture = comps.understat_fixture_with_odds(comp, data, pred.match_id)
-            if fixture is not None:
-                pred = mm.predict_match(model, pred.home, pred.away, fixture=fixture)
+        pred = comps.predict_fixture(comp, model, args.local, args.visitante)
     except mm.PredictionError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
