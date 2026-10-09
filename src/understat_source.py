@@ -17,6 +17,7 @@ import pandas as pd
 import requests
 
 from src.match_model import PredictionError, SourceInfo
+from src.utils import CONNECT_TIMEOUT_S
 
 UNDERSTAT = "https://understat.com"
 HTTP_HEADERS = {
@@ -50,7 +51,7 @@ def fetch_season(session: requests.Session, league: str, season: int, current_se
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            resp = session.get(url, headers=headers, timeout=30)
+            resp = session.get(url, headers=headers, timeout=(CONNECT_TIMEOUT_S, 30))
             resp.raise_for_status()
             dates = resp.json()["dates"]
             break

@@ -93,7 +93,7 @@ ver sección "Mejoras futuras").
 
 ## Requisitos
 
-- Python 3.11 (o una versión 3.11+ estable compatible).
+- Python 3.11 o más nuevo (las pruebas pasan con 3.11, 3.12 y 3.13).
 
 ## Instalación
 
@@ -113,6 +113,42 @@ streamlit run app.py
 Se abrirá automáticamente en el navegador (por defecto en
 `http://localhost:8501`).
 
+## Publicar en Streamlit Community Cloud
+
+La app funciona tal cual en [Streamlit Community Cloud](https://share.streamlit.io)
+(gratis): no usa claves ni secretos, la zona horaria sale del navegador de cada
+visitante y las cachés se escriben junto al código.
+
+1. Entra en [share.streamlit.io](https://share.streamlit.io) con tu cuenta de
+   GitHub y autoriza el acceso al repositorio.
+2. **Create app** → **Deploy a public app from GitHub**.
+3. Repositorio `rromerog27/football-predictor-Macho`, rama `master`, archivo
+   principal `app.py`.
+4. En **App URL** elige la dirección (por ejemplo
+   `football-predictor-macho.streamlit.app`).
+5. En **Advanced settings**, Python 3.12 o 3.13. No hace falta cargar secretos.
+6. **Deploy**. Streamlit instala `requirements.txt` (las dependencias de
+   pruebas están aparte, en `requirements-dev.txt`).
+
+Qué esperar:
+
+- **Primera visita.** El servidor arranca sin datos: descarga el historial de
+  las ligas del día y entrena sus modelos. Medido desde cero: unos 70 segundos
+  un viernes con 7 ligas; mientras tanto la página muestra qué modelo está
+  preparando. Las visitas siguientes salen de la caché en 1-2 segundos, y los
+  modelos se vuelven a entrenar cada 3 horas para sumar los resultados nuevos.
+- **Reposo.** Si nadie la abre en 12 horas, Streamlit la pone a dormir. La
+  siguiente visita la despierta (con un botón) y vuelve a empezar sin caché.
+- **Actualizaciones.** Cada cambio que llega a `master` se publica solo.
+  `app.py` recarga los módulos de `src/` que cambiaron, así no hace falta
+  reiniciar la app.
+- **Memoria.** Unos 600-700 MB con un día cargado (pico medido: 720 MB con
+  11 ligas), por debajo del límite de Community Cloud (2,7 GB).
+- **Mercado FC 27.** El historial (`data/fc27_market.sqlite`) se guarda en el
+  servidor solo mientras la app está despierta: se pierde al dormirse o
+  reiniciarse, y las instantáneas programadas de `scripts/` son para tu
+  computadora. Si FUT.GG no responde desde el servidor, la sección lo avisa.
+
 ## Estructura del proyecto
 
 ```
@@ -124,7 +160,8 @@ football_predictor/
 │   ├── partidos_del_dia.py   # Página Partidos del día (predicciones de 33 ligas y copas)
 │   └── predictor.py          # Página Predictor de partidos
 ├── modelo_prediccion.py      # Predicción por terminal con xG de Understat (Poisson + logística)
-├── requirements.txt          # Dependencias del proyecto
+├── requirements.txt          # Dependencias de la app (las que instala Streamlit Cloud)
+├── requirements-dev.txt      # requirements.txt + pytest, para correr las pruebas
 ├── README.md                 # Este archivo
 │
 ├── data/                     # Archivos de datos locales (ejemplo)
@@ -575,6 +612,7 @@ desplegable en la barra lateral antes de continuar.
 ## Pruebas
 
 ```bash
+pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
