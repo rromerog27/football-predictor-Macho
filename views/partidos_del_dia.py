@@ -2,8 +2,8 @@
 
 Página registrada en `app.py` (página de inicio). Lista los partidos de la
 fecha elegida (en la zona horaria del navegador) de las competiciones
-elegidas y muestra para cada uno la predicción del ensemble Poisson
-(Dixon-Coles) + regresión logística de `src/match_model.py`, con las
+elegidas y muestra para cada uno la predicción del modelo de Poisson
+(Dixon-Coles) de `src/match_model.py`, con las
 probabilidades del mercado cuando ESPN publica cuotas. La sección "Analizar
 un partido" corre el mismo modelo para cualquier cruce de una competición.
 
@@ -270,7 +270,7 @@ def _next_kickoff(codes: tuple[str, ...], after: pd.Timestamp) -> pd.Timestamp |
 
 @st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
 def _competition_model(code: str) -> mm.LeagueModel:
-    """Descarga los datos de la competición y entrena Poisson + logística (lo caro: una vez cada pocas horas)."""
+    """Descarga los datos de la competición y ajusta el modelo (lo caro: una vez cada pocas horas)."""
     return mm.train_league(comps.load_competition(comps.BY_CODE[code]))
 
 
@@ -455,7 +455,7 @@ def _card_summary_html(pred: mm.MatchPrediction, tz: str, show_date: bool = Fals
 
 
 def _detail_html(pred: mm.MatchPrediction) -> str:
-    t, h, a = pred.trained, pred.home_snap, pred.away_snap
+    h, a = pred.home_snap, pred.away_snap
     att_h, def_h = pred.attack_defense("home")
     att_a, def_a = pred.attack_defense("away")
     signal = pred.signal_short
@@ -486,8 +486,8 @@ def _detail_html(pred: mm.MatchPrediction) -> str:
                    if pred.market and pred.market["over25"] is not None else "")
     url = comps.match_url(pred.match_id)
     link = f"<a href='{url}' target='_blank' rel='noopener'>Ver partido ↗</a>" if url else ""
-    ensemble = pred.p_before_lineups if pred.lineups is not None else pred.p_final
     lineup_row = row("Con alineaciones", pred.p_final) if pred.lineups is not None else ""
+    over_before = f" (sin alineaciones {pred.over25_poisson * 100:.1f}%)" if pred.lineups is not None else ""
     lineup_note = ""
     if pred.lineups is not None:
         parts = [f"{_esc(name)}: {_esc(', '.join(team.missing)) if team.missing else _rotation_text(team)}"
@@ -496,12 +496,11 @@ def _detail_html(pred: mm.MatchPrediction) -> str:
     return (
         "<div class='pd-detail'>"
         "<table><tr><th>Modelo</th><th>1</th><th>X</th><th>2</th></tr>"
-        f"{row('Poisson (DC)', pred.p_poisson)}{row('Logística', pred.p_logistic)}"
-        f"{row(f'Ensemble ({t.w_poisson:.0%}/{1 - t.w_poisson:.0%})', ensemble)}{lineup_row}{market_row}</table>"
+        f"{row('Poisson (Dixon-Coles)', pred.p_poisson)}{lineup_row}{market_row}</table>"
         f"{team_block(pred.home, h, att_h, def_h, 'en casa')}"
         f"{team_block(pred.away, a, att_a, def_a, 'fuera')}"
         f"{lineup_note}<div><b>Marcadores más probables:</b> {scores}</div>"
-        f"<div><b>Over 2.5:</b> modelo {pred.over25 * 100:.1f}% (Poisson {pred.over25_poisson * 100:.1f}%)"
+        f"<div><b>Over 2.5:</b> modelo {pred.over25 * 100:.1f}%{over_before}"
         f"{over_market} · <b>Ambos anotan:</b> {pred.btts * 100:.1f}%</div>"
         f"<div style='margin-top:6px'>{link}</div>"
         "</div>"
@@ -739,8 +738,8 @@ def _validation_table(models: dict[str, mm.LeagueModel]) -> pd.DataFrame:
             "Peso mercado": f"{t.market_weight:.0%}",
             "ρ (Dixon-Coles)": round(t.rho, 3),
             "Log loss referencia": round(t.ll_baseline, 3),
-            "Log loss modelo": round(t.ll_ensemble, 3),
-            "Mejora": round(t.ll_baseline - t.ll_ensemble, 3),
+            "Log loss modelo": round(t.ll_model, 3),
+            "Mejora": round(t.ll_baseline - t.ll_model, 3),
             "Partidos": t.n_val,
         })
     return pd.DataFrame(rows)
@@ -897,15 +896,14 @@ def section_today(tz: str) -> None:
             "17 ligas mejora el log loss en 0.002. Solo en ligas.\n"
             "- **Recién ascendidos:** su historial de la división inferior (ESPN) entra en el cálculo de fuerzas, "
             "con una calibración de su nivel estimada con ascensos anteriores.\n"
-            "- **Regresión logística:** reajusta la señal de Poisson con la racha de puntos, la localía y el "
-            "descanso. **Ensemble:** el peso de cada modelo minimiza el log loss en el 30% más reciente.\n"
+
             "- **Mercado del partido:** probabilidades de las cuotas de DraftKings (vía ESPN) sin el margen de la "
             "casa. La etiqueta amarilla marca el resultado al que el modelo da 10 o más puntos más que el mercado; "
             "**no es una recomendación de apuesta**: el mercado suele ser más preciso que cualquier modelo público.\n"
             "- **No incluye** lesiones ni sanciones hasta que se conocen los titulares; el descanso solo cuenta "
             "los partidos de las competiciones descargadas.\n"
-            "- En partidos ya jugados, la regresión logística se entrenó con toda la temporada: el "
-            "\"acertó/falló\" es orientativo, no un backtest.\n"
+            "- En partidos ya jugados, la predicción usa solo los datos anteriores al inicio y parámetros "
+            "ajustados con partidos más viejos: el \"acertó/falló\" es limpio, aunque un solo día dice poco.\n"
             "- Cada modelo se reentrena cada 3 horas con los resultados nuevos."
         )
         st.markdown("**Validación de los modelos de hoy** (log loss 1X2 en el 30% más reciente del histórico; "
@@ -977,8 +975,8 @@ def _backtest_row(code: str, r: backtest.BacktestResult) -> dict:
 
 def section_performance() -> None:
     st.markdown(
-        "<div class='pd-note'>Cada modelo se valida con el 30% más reciente de su histórico (partidos que la "
-        "regresión logística no vio al entrenar) y se compara con las <b>cuotas de cierre</b> de esos mismos "
+        "<div class='pd-note'>Cada modelo se valida con el 30% más reciente de su histórico (partidos que no "
+        "usó para ajustarse) y se compara con las <b>cuotas de cierre</b> de esos mismos "
         "partidos (football-data.co.uk; en copas y ligas que no cubre, las que ESPN guarda desde finales de "
         "2025): la referencia más exigente, porque recogen toda la información del mercado justo antes del "
         "inicio. Log loss: menor es mejor.</div>", unsafe_allow_html=True)
@@ -991,15 +989,15 @@ def section_performance() -> None:
         return
     t = model.trained
     c1, c2, c3 = st.columns(3)
-    c1.metric("Log loss del modelo", f"{t.ll_ensemble:.4f}", help=f"{t.n_val} partidos de validación ({t.val_period})")
+    c1.metric("Log loss del modelo", f"{t.ll_model:.4f}", help=f"{t.n_val} partidos de validación ({t.val_period})")
     c2.metric("Referencia (frecuencias 1/X/2)", f"{t.ll_baseline:.4f}")
-    c3.metric("Mejora sobre la referencia", f"{t.ll_baseline - t.ll_ensemble:+.4f}")
+    c3.metric("Mejora sobre la referencia", f"{t.ll_baseline - t.ll_model:+.4f}")
     market = (f"mercado {t.market_weight:.0%} ({model.data.market_coverage:.0%} de partidos con cuotas en 12 "
               f"meses) · " if t.market_weight else "sin señal de mercado · ")
     st.caption(f"Parámetros elegidos con datos: {market}señal {model.data.signal_name} {t.signal_weight:.0%} / goles "
                f"{1 - t.signal_weight:.0%} · Dixon-Coles ρ {t.rho:+.3f} · total de goles {t.total_shrink:.0%} propio "
                f"/ {1 - t.total_shrink:.0%} media · recién llegados ×{t.newcomer[0]:.2f} goles, ×{t.newcomer[1]:.2f} "
-               f"rival · ensemble {t.w_poisson:.0%} Poisson / {1 - t.w_poisson:.0%} logística.")
+               f"rival.")
 
     with st.spinner("Comparando con las cuotas de cierre…"):
         try:

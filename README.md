@@ -15,8 +15,8 @@ abajo). No comparte datos con el predictor de partidos.
 
 La página **Partidos del día** también usa internet: descarga resultados y
 xG (Understat) o tiros y cuotas (ESPN) de 33 ligas y copas y muestra, para
-los partidos de la fecha elegida, la predicción de un ensemble Poisson
-(Dixon-Coles) + regresión logística comparada con el mercado; también
+los partidos de la fecha elegida, la predicción de un modelo de Poisson
+(Dixon-Coles) comparada con el mercado; también
 permite correr el modelo para cualquier cruce de una competición. El mismo modelo se puede
 usar desde la terminal con **`modelo_prediccion.py`** (ver "Partidos del día
 y predicción por terminal" más abajo). No comparte datos con el predictor de
@@ -159,7 +159,7 @@ football_predictor/
 │   ├── fc27_mercado.py       # Página Mercado FC 27
 │   ├── partidos_del_dia.py   # Página Partidos del día (predicciones de 33 ligas y copas)
 │   └── predictor.py          # Página Predictor de partidos
-├── modelo_prediccion.py      # Predicción por terminal con xG de Understat (Poisson + logística)
+├── modelo_prediccion.py      # Predicción por terminal (el modelo de Partidos del día)
 ├── requirements.txt          # Dependencias de la app (las que instala Streamlit Cloud)
 ├── requirements-dev.txt      # requirements.txt + pytest, para correr las pruebas
 ├── README.md                 # Este archivo
@@ -179,7 +179,7 @@ football_predictor/
 │   ├── prediction_model.py     # Regresión logística de respaldo + predicción combinada
 │   ├── report_generator.py     # Exportación a CSV, Excel y HTML
 │   ├── market_odds.py          # Comparación contra cuotas de mercado + simulación de value bets
-│   ├── match_model.py          # Modelo Poisson (Dixon-Coles) + logística, independiente de la fuente
+│   ├── match_model.py          # Modelo Poisson (Dixon-Coles), independiente de la fuente
 │   ├── competitions.py         # Registro de ligas y copas, carga de datos, calendario y cuotas del día
 │   ├── understat_source.py     # Descarga de Understat (xG)
 │   ├── espn_source.py          # Descarga de ESPN (resultados, tiros, calendario, cuotas)
@@ -216,7 +216,7 @@ football_predictor/
 | `src/report_generator.py` | Exporta a CSV/Excel/HTML lo que ya calcularon los demás módulos: tabla de estadísticas, predicción de un partido, comparación de equipos, matriz de marcadores y el reporte HTML completo. |
 | `src/market_odds.py` | Convierte cuotas 1X2 a probabilidad implícita (quitando el margen de la casa), evalúa qué tan bien predice el mercado los partidos de prueba, y simula en retrospectiva una estrategia de apuestas de valor comparando el modelo contra el mercado. |
 | `views/partidos_del_dia.py` | Página Partidos del día: lista los partidos de la fecha (en la zona horaria del navegador) con la predicción y el mercado de cada uno, y la sección "Analizar un partido". Solo presenta: el modelo vive en `src/match_model.py`. |
-| `src/match_model.py` | Modelo independiente de la fuente: fuerza ajustada por rival (señal y goles), Poisson con Dixon-Coles, regresión logística, ensemble, validación y predicción de un partido (con las probabilidades del mercado si hay cuotas). |
+| `src/match_model.py` | Modelo independiente de la fuente: fuerza ajustada por rival (señal y goles), Poisson con Dixon-Coles, validación y predicción de un partido (con las probabilidades del mercado si hay cuotas). |
 | `src/competitions.py` | Registro de las 33 ligas y copas (fuente, región, pool de ligas de las copas), carga de sus datos, partidos del día y cruce de cuotas de ESPN con los partidos de Understat. |
 | `src/understat_source.py` | Descarga y caché del xG de Understat, convertido a las columnas estándar del modelo. |
 | `src/football_data_source.py` | Descarga y caché de football-data.co.uk: resultados con cuotas de cierre (Pinnacle o media del mercado, 1X2 y Over/Under), descartando cuotas corruptas. |
@@ -370,7 +370,7 @@ internacionales y Japón). Tiene dos secciones:
     del 45%). Una etiqueta amarilla ("+11 al 1") marca dónde el modelo da 10
     o más puntos más que el mercado (≈1 de cada 10 partidos; no es una
     recomendación de apuesta). Al tocar una fila se despliega el análisis:
-    mercado, Poisson, logística, alineaciones, racha y señal de cada equipo.
+    modelo, alineaciones, mercado, racha y señal de cada equipo.
   - En partidos ya jugados muestra el resultado y si el pronóstico acertó.
     Si no hay partidos ese día, ofrece saltar a la próxima fecha con
     partidos. `?fecha=AAAA-MM-DD` en la URL abre la página en ese día.
@@ -378,8 +378,8 @@ internacionales y Japón). Tiene dos secciones:
   "Correr modelo". Si el partido está en el calendario de los próximos 14
   días se usan su fecha y sus cuotas; si no, los datos disponibles hasta hoy.
 
-Cada competición se entrena una vez y queda en caché 3 horas (4-14 s por
-competición la primera vez); predecir cada partido es instantáneo. Las horas
+Cada competición se entrena una vez y queda en caché 3 horas (unos segundos
+por competición la primera vez); predecir cada partido es instantáneo. Las horas
 y el "día" usan la zona horaria del navegador (se puede cambiar en la barra
 lateral). Toda la app sigue el modo claro u oscuro del sistema
 (`.streamlit/config.toml` define los dos temas y `src/ui_theme.py`, los
@@ -495,18 +495,17 @@ diría su fuerza en la división inferior.
    descartado: anticipar las rotaciones con el calendario (copas a pocos
    días), que no las predice. Solo en ligas, desde 2 h antes del inicio
    hasta 3 h después.
-7. *Regresión logística multinomial:* reajusta la señal de Poisson
-   (`log(λ local/λ visitante)`, `log(λ total)` y las probabilidades 1X2 de
-   Poisson como `log(P local/P empate)` y `log(P visitante/P empate)`) con la
-   racha de puntos de los últimos 5 partidos, los últimos 5 en casa del local
-   y fuera del visitante (localía) y el descanso en categorías (corto ≤4
-   días, normal 5-7, largo ≥8). Se entrena con instantáneas pre-partido sin
-   fuga de información y elige su regularización con validación cruzada
-   temporal.
-8. *Ensemble:* el peso Poisson/logística minimiza el log loss en el 30% más
-   reciente del histórico, que la logística no vio al entrenar. Para
-   Over/Under y ambos anotan, la matriz de Poisson se reescala para que
-   reproduzca el 1X2 final.
+   Con alineaciones, la matriz de Poisson se reescala para que reproduzca
+   el 1X2 ajustado (Over/Under y ambos anotan).
+
+Hasta octubre de 2026 había además una regresión logística (racha de puntos,
+localía y descanso sobre la señal de Poisson) y un ensemble de ambos. Se
+quitó: su peso se elegía con los mismos partidos con que se medía, lo que
+inflaba su aporte. Elegido en una mitad de la validación y medido en la otra,
+el ensemble daba 1.0089 frente a 1.0084 de Poisson solo (7.325 partidos de
+21 ligas), y la logística sola era peor que Poisson en 17 de las 21. Sin ella,
+cada competición entrena ~40% más rápido y nada se elige mirando la
+validación.
 
 En las ligas, las filas de entrenamiento son solo partidos de la propia
 competición (la división inferior solo aporta historial). Se entrena con los
@@ -515,8 +514,8 @@ se valida con todos, como se usa el modelo.
 
 **Validación** (log loss 1X2 en el 30% más reciente; la referencia es
 predecir siempre las frecuencias de 1/X/2 del entrenamiento): las 33
-competiciones mejoran la referencia, de +0.018 (Uruguay, solo goles) a
-+0.175 (Primeira Liga). La sección "Rendimiento del modelo" de la página
+competiciones mejoran la referencia, de +0.016 (Uruguay, solo goles) a
++0.164 (Primeira Liga). Nada del modelo se elige mirando esos partidos. La sección "Rendimiento del modelo" de la página
 muestra la validación y el backtest de cada competición.
 
 **Backtest contra el mercado** (`src/backtest.py`, `src/football_data_source.py`).
@@ -529,27 +528,30 @@ Liga MX, MLS, Argentina, Brasil y Japón. En las demás ligas y copas se usan
 las cuotas previas que ESPN guarda en la ficha de cada partido (desde finales
 de 2025; hacen falta al menos 50 partidos de validación con cuotas).
 
-Resultado en los mismos 7.328 partidos de las 21 competiciones:
+Resultado en 7.325 partidos de las 21 competiciones:
 
-| | Antes | Con señal de mercado |
+| | Modelo | Cierre del mercado |
 |---|---|---|
-| Log loss 1X2 del modelo | 1.0145 | **1.0072** |
-| Distancia al cierre (modelo − mercado) | +0.020 | **+0.013** |
-| Log loss Over/Under 2.5 (mercado 0.6730) | 0.6828 | 0.6790 |
+| Log loss 1X2 | **1.0084** | 0.9944 |
+| Log loss Over/Under 2.5 (5.331 partidos) | 0.6791 | 0.6730 |
 
-- Mejoran 20 de las 21 ligas; las que más, Serie A (−0.016), LaLiga 2
-  (−0.017), Primeira Liga (−0.014), LaLiga (−0.013) y Süper Lig (−0.011).
-  Solo la MLS queda igual (+0.0005).
-- Ejemplos de distancia al cierre: Premier League 1.033 vs 1.018, LaLiga
-  0.963 vs 0.954, Bundesliga 0.968 vs 0.960, Primeira Liga 0.908 vs 0.904.
-  LaLiga 2 y la liga rusa quedan a la par o por delante del cierre.
-- Con cuotas de ESPN: Colombia +0.012, Chile −0.010 (mejor que el mercado),
-  Perú +0.038, Ecuador +0.024, Uruguay +0.021, Paraguay +0.024,
-  Libertadores +0.078 y Sudamericana +0.054 (52 y 63 partidos). En esas
+- Distancia al cierre: +0.014. Ejemplos: Premier League 1.034 vs 1.018,
+  LaLiga 0.967 vs 0.954, Bundesliga 0.968 vs 0.960, Primeira Liga 0.920
+  vs 0.904. LaLiga 2 (−0.0005) y la liga rusa (−0.021) quedan a la par o
+  por delante del cierre.
+- Las cifras anteriores de este README (1.0145 → 1.0072 al sumar la señal
+  de mercado) se midieron con el ensemble Poisson/logística, cuyo peso se
+  elegía con estos mismos partidos; con esa ventaja quitada, el modelo de
+  entonces daba 1.0089. La señal de mercado mejoró 20 de las 21 ligas (las
+  que más, Serie A −0.016, LaLiga 2 −0.017, Primeira Liga −0.014, LaLiga
+  −0.013 y Süper Lig −0.011); esas comparaciones siguen valiendo porque
+  ambos lados se midieron igual.
+- Con cuotas de ESPN: Colombia +0.012, Chile −0.008 (mejor que el mercado),
+  Perú +0.037, Ecuador +0.025, Uruguay +0.019, Paraguay +0.024,
+  Libertadores +0.080 y Sudamericana +0.054 (52 y 63 partidos). En esas
   competiciones la señal de mercado mejoró la validación de −0.001
   (Colombia, Paraguay) a −0.027 (Sudamericana). En las copas UEFA, con
-  menos de 100 partidos de validación por copa, el efecto no es
-  concluyente.
+  menos de 30 partidos con cuotas por copa, no hay backtest.
 - Mezclar modelo y mercado sigue sin mejorar al mercado solo: el cierre ya
   contiene la información del modelo. El ROI simulado apostando cuando el
   modelo se aleja del mercado es negativo en casi todas las ligas.
@@ -564,6 +566,29 @@ Resultado en los mismos 7.328 partidos de las 21 competiciones:
   calibración a posteriori gana solo 0.0004, así que la prudencia del
   modelo con los favoritos es información que no tiene, no mala
   calibración) y descontar la temporada anterior tras el parón (−0.0001).
+- Probado y descartado en octubre de 2026 (diferencia total sobre los
+  mismos 7.325 partidos ± su error estándar; nada supera el ruido):
+  - xG aproximado con los penales convertidos: se parece más al xG real
+    (correlación 0.744 → 0.776 en 15.888 partidos-equipo de las 5 grandes,
+    fuera de muestra) pero no predice mejor (+0.00002 ± 0.00015; sin
+    penales, −0.00007 ± 0.00010). Córners, posesión y pases de tiro casi no
+    lo acercan al xG real (+0.002 de correlación entre los tres).
+  - Pesar menos los partidos con una roja temprana (antes del minuto 60 o
+    75, peso 0.5 o 0.2): entre +0.00002 y +0.00005.
+  - Localía propia de cada equipo (altura, viajes): no se repite de una
+    temporada a la siguiente (correlación entre temporadas ~0 en Liga MX,
+    MLS, Colombia, Brasil y las 5 grandes): es ruido.
+  - Parámetros comunes a todas las ligas en vez de los de cada una: ρ de
+    Dixon-Coles −0.06 (+0.0003), peso de la forma reciente (+0.00004),
+    acercamiento del total (−0.00001); ventana de 18 meses (+0.0011, peor);
+    1 o 4 partidos de suavizado inicial (±0.0001).
+  - xG real de Understat en lugar del aproximado: en las 5 grandes da lo
+    mismo (−0.0009 ± 0.0015), así que llevarlo a las copas no cambiaría nada.
+  - La calibración ya es buena (empates y favoritos salen con frecuencias
+    muy cercanas a las reales, igual que en el mercado) y mezclar el modelo
+    con las cuotas no mejora a las cuotas solas (+0.0014): la distancia al
+    cierre es información que el modelo no tiene (lesiones y alineaciones
+    antes de que se publiquen; ESPN no publica lesionados de fútbol).
 - Versión anterior: variables de Poisson en la logística (−0.0004),
   decaimiento temporal (−0.0006), historial de la división inferior
   (−0.0006), acercamiento del total (Over/Under 0.6851 → 0.6802).

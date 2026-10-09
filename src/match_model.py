@@ -1,4 +1,4 @@
-"""Modelo de predicción de partidos: Poisson (Dixon-Coles) + regresión logística.
+"""Modelo de predicción de partidos: Poisson con la corrección de Dixon-Coles.
 
 Núcleo independiente de la fuente de datos, compartido por la página
 "Partidos del día" y el script `modelo_prediccion.py`. Recibe un DataFrame de
@@ -21,31 +21,22 @@ suavizado bayesiano de 2 partidos "promedio") y se mezcla con su forma en los
 con datos (máxima verosimilitud de los goles reales en el periodo de
 entrenamiento).
 
-Modelos:
-- Poisson con corrección de Dixon-Coles (ρ por máxima verosimilitud): matriz
-  de marcadores → 1X2, Over/Under 2.5, ambos anotan.
-- Regresión logística multinomial: reajusta la señal de Poisson con la racha
-  de puntos, la localía y el descanso.
-- Ensemble: el peso de cada modelo minimiza el log loss en el 30% más reciente
-  del histórico, que la regresión logística no vio al entrenar.
+Con esas fuerzas, Poisson con la corrección de Dixon-Coles (ρ por máxima
+verosimilitud) da la matriz de marcadores → 1X2, Over/Under 2.5 y ambos
+anotan. Cuando hay alineaciones, `src/lineups.py` ajusta el 1X2 final. El 30%
+más reciente del histórico se reserva para validar (y para el backtest).
 """
 
 from __future__ import annotations
 
 import difflib
 import unicodedata
-import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize_scalar
 from scipy.stats import poisson
-from sklearn.compose import ColumnTransformer
-from sklearn.linear_model import LogisticRegressionCV
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 # Columnas que deben traer los partidos (horas en UTC sin zona; NaN donde no aplica).
 STANDARD_COLUMNS = [
@@ -87,23 +78,10 @@ FOCUS_MIN_VAL = 150  # partidos de validación de la propia competición para ev
 # Su fuerza sale de pocos partidos o de otra división, con un sesgo de nivel que se calibra con datos.
 NEWCOMER_MATCHES = 10
 MIN_TRAIN_ROWS, MIN_VAL_ROWS = 200, 60
-ENSEMBLE_WEIGHT_GRID = np.round(np.arange(0.0, 1.0001, 0.05), 2)
 CLASSES = ["H", "D", "A"]
 # Un partido del calendario más lejano que esto (p. ej. la vuelta, meses después) no fija el corte:
 # se predice con los datos de hoy en lugar de proyectar el descanso hasta esa fecha.
 FIXTURE_HORIZON_DAYS = 14
-
-NUMERIC_FEATURES = [
-    "log_lambda_ratio",
-    "log_lambda_total",
-    "poisson_home_vs_draw",
-    "poisson_away_vs_draw",
-    "ppg5_home",
-    "ppg5_away",
-    "ppg5_home_at_home",
-    "ppg5_away_away",
-]
-CATEGORICAL_FEATURES = ["rest_home", "rest_away"]
 
 # Abreviaturas que la búsqueda por subcadena no resuelve sola.
 TEAM_ALIASES = {
@@ -534,7 +512,7 @@ def market_probs(fixture: pd.Series | None) -> dict | None:
 
 
 # --------------------------------------------------------------------------
-# Histórico, regresión logística y ensemble
+# Histórico y entrenamiento
 # --------------------------------------------------------------------------
 
 
@@ -604,54 +582,11 @@ def history_lambdas(hist: pd.DataFrame, shrink: float, signal_weight: float,
     return lam_h, lam_a
 
 
-def history_features(hist: pd.DataFrame, lam_h: np.ndarray, lam_a: np.ndarray, p_poisson: np.ndarray) -> pd.DataFrame:
-    p = np.clip(p_poisson, 1e-6, 1)
-    return pd.DataFrame(
-        {
-            "log_lambda_ratio": np.log(lam_h / lam_a),
-            "log_lambda_total": np.log(lam_h + lam_a),
-            "poisson_home_vs_draw": np.log(p[:, 0] / p[:, 1]),  # la forma no lineal del empate según Poisson
-            "poisson_away_vs_draw": np.log(p[:, 2] / p[:, 1]),
-            "ppg5_home": hist["h_ppg5"],
-            "ppg5_away": hist["a_ppg5"],
-            "ppg5_home_at_home": hist["h_ppg5_venue"],
-            "ppg5_away_away": hist["a_ppg5_venue"],
-            "rest_home": hist["h_rest_days"].map(rest_category),
-            "rest_away": hist["a_rest_days"].map(rest_category),
-        }
-    )
-
-
-def logistic_pipeline() -> Pipeline:
-    prep = ColumnTransformer(
-        [
-            ("num", StandardScaler(), NUMERIC_FEATURES),
-            ("cat", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL_FEATURES),
-        ]
-    )
-    model = LogisticRegressionCV(
-        Cs=np.logspace(-3, 1, 9), cv=TimeSeriesSplit(n_splits=5), scoring="neg_log_loss", max_iter=5000
-    )
-    return Pipeline([("prep", prep), ("lr", model)])
-
-
-def fit_logistic(features: pd.DataFrame, y: np.ndarray) -> Pipeline:
-    with warnings.catch_warnings():  # avisos de deprecación de scikit-learn, sin efecto en el ajuste
-        warnings.simplefilter("ignore", FutureWarning)
-        return logistic_pipeline().fit(features, y)
-
-
 def multiclass_log_loss(y: np.ndarray, proba_hda: np.ndarray) -> float:
     """Log loss con columnas en orden CLASSES (H, D, A)."""
     cols = np.array([CLASSES.index(v) for v in y])
     p = np.clip(proba_hda[np.arange(len(y)), cols], 1e-15, 1.0)
     return float(-np.mean(np.log(p)))
-
-
-def predict_hda(model: Pipeline, features: pd.DataFrame) -> np.ndarray:
-    proba = model.predict_proba(features)
-    order = [list(model.classes_).index(c) for c in CLASSES]
-    return proba[:, order]
 
 
 def competition_kappa(competition: np.ndarray, hg: np.ndarray, ag: np.ndarray, lam_h: np.ndarray,
@@ -723,26 +658,22 @@ class TrainedModels:
     newcomer: tuple[float, float]  # recién llegados: (factor de sus goles, factor de los del rival)
     total_shrink: float  # peso del total de goles propio frente a la media de la competición
     total_mean: dict  # total de goles esperado medio por competición
-    logistic: Pipeline
-    w_poisson: float
     n_train: int
     n_val: int  # partidos de validación evaluados (los de la competición si hay suficientes)
     val_period: str
-    ll_poisson: float
-    ll_logistic: float
-    ll_ensemble: float
+    ll_model: float  # log loss 1X2 de validación
     ll_baseline: float  # predecir siempre las frecuencias 1/X/2 del entrenamiento (referencia)
     val_predictions: pd.DataFrame = field(repr=False)  # predicciones fuera de muestra (para el backtest)
     evaluated_on: str = "all"  # "focus" (solo la competición) o "all" (todo el pool)
     n_val_focus: int = 0  # partidos de validación de la propia competición (copas con pool)
-    ll_ensemble_focus: float | None = None
+    ll_model_focus: float | None = None
     market_weight: float = 0.0  # peso de la fuerza según el mercado (cuotas de cierre de partidos anteriores)
 
 
 def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None = None,
                  kappa_exclude: frozenset[str] = frozenset(),
                  market_weights: tuple[float, ...] = (0.0,)) -> TrainedModels:
-    """Entrena Poisson + logística sobre el histórico de instantáneas. `kappa_exclude`: competiciones
+    """Ajusta el modelo de Poisson sobre el histórico de instantáneas. `kappa_exclude`: competiciones
     sin calibración propia de goles (las copas: pocos partidos, y en validación empeoraba).
     `market_weights`: pesos posibles de la fuerza según el mercado (columnas *_mkt del histórico)."""
     hist = hist.sort_values("datetime").reset_index(drop=True)
@@ -799,39 +730,28 @@ def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None 
     lam_h, lam_a = shrink_totals(comp, lam_h, lam_a, total_shrink, total_mean)
     # 2) Dixon-Coles: ρ por máxima verosimilitud en entrenamiento.
     rho = fit_rho(hg[train_mask], ag[train_mask], lam_h[train_mask], lam_a[train_mask])
-    p_poisson = np.array([outcome_probs(score_matrix(lh, la, rho)) for lh, la in zip(lam_h, lam_a)])
-    features = history_features(hist, lam_h, lam_a, p_poisson)
     y = hist["result"].to_numpy()
 
-    # 3) Regresión logística entrenada solo con el periodo anterior a la validación.
-    logistic = fit_logistic(features[train_mask], y[train_mask])
-    p_logistic_val = predict_hda(logistic, features[val_mask])
-
-    # 4) Evaluación: la propia competición si tiene suficientes partidos de validación; si no, todo el pool.
+    # 3) Evaluación: la propia competición si tiene suficientes partidos de validación; si no, todo el pool.
+    #    Nada se elige con la validación: es una medida limpia de cómo predice el modelo.
     in_focus = (comp == focus) if focus is not None else np.ones(len(hist), bool)
     use_focus = focus is not None and (in_focus & val_mask).sum() >= FOCUS_MIN_VAL
     eval_val = in_focus[val_mask] if use_focus else np.ones(val_mask.sum(), bool)
     eval_train = in_focus[train_mask] if use_focus else np.ones(train_mask.sum(), bool)
-    y_val, p_pois_val = y[val_mask][eval_val], p_poisson[val_mask][eval_val]
-    p_log_val = p_logistic_val[eval_val]
-
-    # 5) Peso del ensemble que minimiza el log loss de validación.
-    losses = [multiclass_log_loss(y_val, w * p_pois_val + (1 - w) * p_log_val) for w in ENSEMBLE_WEIGHT_GRID]
-    w_poisson = float(ENSEMBLE_WEIGHT_GRID[int(np.argmin(losses))])
+    matrices = [score_matrix(lh, la, rho) for lh, la in zip(lam_h[val_mask], lam_a[val_mask])]
+    p_val = np.array([outcome_probs(m) for m in matrices])
+    y_val = y[val_mask][eval_val]
 
     # Predicciones fuera de muestra de todo el periodo de validación (para el backtest contra el mercado).
     val = hist[val_mask].reset_index(drop=True)
-    p_ens_all = w_poisson * p_poisson[val_mask] + (1 - w_poisson) * p_logistic_val
-    over = [goal_markets(reweight_matrix(score_matrix(lh, la, rho), pe))[0]
-            for lh, la, pe in zip(lam_h[val_mask], lam_a[val_mask], p_ens_all)]
+    over = [goal_markets(m)[0] for m in matrices]
     val_predictions = pd.DataFrame({
         "id": val["id"] if "id" in val else None, "datetime": val["datetime"], "competition": val["competition"],
         "home": val["home"], "away": val["away"],
         "hg": val["hg"], "ag": val["ag"], "result": val["result"],
         "lam_h": lam_h[val_mask], "lam_a": lam_a[val_mask], "over25": over,
         "newcomer": (new_h | new_a)[val_mask], "low_data": low[val_mask],
-        **{f"p_{k}_{c}": p[:, i] for k, p in (("poisson", p_poisson[val_mask]), ("logistic", p_logistic_val),
-                                              ("ensemble", p_ens_all)) for i, c in enumerate(CLASSES)},
+        **{f"p_model_{c}": p_val[:, i] for i, c in enumerate(CLASSES)},
     })
 
     focus_metrics = {}
@@ -840,7 +760,7 @@ def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None 
         if n_focus >= 20:
             sub = in_focus[val_mask]
             focus_metrics = {"n_val_focus": n_focus,
-                             "ll_ensemble_focus": multiclass_log_loss(y[val_mask][sub], p_ens_all[sub])}
+                             "ll_model_focus": multiclass_log_loss(y[val_mask][sub], p_val[sub])}
 
     val_dates = hist.loc[val_mask, "datetime"][eval_val]
     train_freq = [np.mean(y[train_mask][eval_train] == c) for c in CLASSES]
@@ -852,14 +772,10 @@ def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None 
         newcomer=newcomer,
         total_shrink=total_shrink,
         total_mean=total_mean,
-        logistic=fit_logistic(features[~low], y[~low]),  # modelo final: todo el histórico con datos suficientes
-        w_poisson=w_poisson,
         n_train=int(train_mask.sum()),
         n_val=int(eval_val.sum()),
         val_period=f"{val_dates.min():%d/%m/%Y} – {val_dates.max():%d/%m/%Y}",
-        ll_poisson=multiclass_log_loss(y_val, p_pois_val),
-        ll_logistic=multiclass_log_loss(y_val, p_log_val),
-        ll_ensemble=float(min(losses)),
+        ll_model=multiclass_log_loss(y_val, p_val[eval_val]),
         ll_baseline=multiclass_log_loss(y_val, np.tile(train_freq, (len(y_val), 1))),
         val_predictions=val_predictions,
         evaluated_on="focus" if use_focus else "all",
@@ -972,11 +888,10 @@ class MatchPrediction:
     lam_home: float
     lam_away: float
     p_poisson: np.ndarray  # [local, empate, visitante] (Poisson con Dixon-Coles)
-    p_logistic: np.ndarray
-    p_final: np.ndarray
+    p_final: np.ndarray  # el de Poisson, o ajustado por las alineaciones si se publicaron
     over25: float
     btts: float
-    over25_poisson: float
+    over25_poisson: float  # sin el ajuste por alineaciones
     btts_poisson: float
     top_scores: list[tuple[int, int, float]]  # de la matriz de Poisson
     market: dict | None  # probabilidades del mercado (sin margen) si hay cuotas
@@ -989,7 +904,7 @@ class MatchPrediction:
     base_home: float = float("nan")  # goles medios esperados del local de la competición (con su calibración)
     base_away: float = float("nan")
     lineups: object | None = field(default=None, repr=False)  # src.lineups.LineupInfo si se aplicaron
-    p_before_lineups: np.ndarray | None = None  # 1X2 final antes del ajuste por alineaciones
+    p_before_lineups: np.ndarray | None = None  # 1X2 antes del ajuste por alineaciones (= p_poisson)
 
     @property
     def signal_short(self) -> str:
@@ -1059,10 +974,7 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
     base_h, base_a = base_goals(ratings["gls"].goals_home, ratings["gls"].goals_away, neutral)
     matrix = score_matrix(lam_h, lam_a, t.rho)
     p_poisson = outcome_probs(matrix)
-    features = history_features(pd.DataFrame([snapshot_columns(h, a)]), np.array([lam_h]), np.array([lam_a]),
-                                p_poisson[None, :])
-    p_logistic = predict_hda(t.logistic, features)[0]
-    p_final = t.w_poisson * p_poisson + (1 - t.w_poisson) * p_logistic
+    p_final = p_poisson
     p_before_lineups = None
     if lineups is not None:
         p_before_lineups, p_final = p_final, shift_home_away(p_final, lineups.shift)
@@ -1084,7 +996,6 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
         lam_home=lam_h,
         lam_away=lam_a,
         p_poisson=p_poisson,
-        p_logistic=p_logistic,
         p_final=p_final,
         over25=over25,
         btts=btts,
