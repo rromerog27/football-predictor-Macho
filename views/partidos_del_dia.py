@@ -31,6 +31,7 @@ from src import competitions as comps
 from src import football_data_source as fd
 from src import lineups
 from src import match_model as mm
+from src import performance as perf
 
 MODEL_TTL_S = 3 * 3600  # igual que la caché del año/temporada en curso: el modelo ve los resultados nuevos
 DAY_TTL_S = 10 * 60
@@ -45,6 +46,8 @@ TIMEZONES = [
 ORDERED_CODES = [c.code for region in comps.REGIONS for c in comps.COMPETITIONS if c.region == region]
 ESPN_LOGO = "https://a.espncdn.com/i/teamlogos/soccer/500/{}.png"  # escudo por id de equipo de ESPN
 WEEKDAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+WEEKDAYS_SHORT = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
+MONTHS_SHORT = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 MONTHS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
           "noviembre", "diciembre"]
 HIGHLIGHTS = ["Más claros", "Más parejos", "Vs mercado", "XI confirmados"]
@@ -57,11 +60,13 @@ PAGE_CSS = """
 /* Barra 1X2: escala divergente local (azul) ↔ visitante (naranja) con empate neutro. Validados con el
    validador de paleta (CVD ΔE ≥ 24, contraste ≥ 3:1) en claro (#2a78d6/#eb6834 sobre blanco) y en oscuro
    (#3b82e8/#e8693a sobre la superficie oscura); el gris es el punto medio de cada modo. */
-:root { --pd-home: #2a78d6; --pd-draw: #CBD5E1; --pd-away: #eb6834; }
-:root[data-fc-theme="dark"] { --pd-home: #3b82e8; --pd-draw: #475569; --pd-away: #e8693a; }
+:root { --pd-home: #2a78d6; --pd-draw: #CBD5E1; --pd-away: #eb6834; --pd-ref: #8A93A0; }
+:root[data-fc-theme="dark"] { --pd-home: #3b82e8; --pd-draw: #475569; --pd-away: #e8693a; --pd-ref: #97A2B3; }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-fc-theme]) { --pd-home: #3b82e8; --pd-draw: #475569; --pd-away: #e8693a; }
+  :root:not([data-fc-theme]) { --pd-home: #3b82e8; --pd-draw: #475569; --pd-away: #e8693a; --pd-ref: #97A2B3; }
 }
+/* --pd-ref: gris de contexto (el mercado en la calibración), separado del azul del modelo (validador: ΔE normal
+   16.4 en claro y 17.1 en oscuro, contraste ≥ 3:1); además lleva marcadores huecos y etiqueta propia. */
 
 /* -- Cabecera compacta -- */
 .pd-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px;
@@ -127,6 +132,42 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
 .pd-hl-main b { font-size: 1.45rem; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pd-hl-main span { font-size: .78rem; color: var(--fc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pd-hl-foot { font-size: .72rem; color: var(--fc-muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
+
+/* -- Rendimiento y picks: tarjetas de cifras -- */
+.pd-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 4px 0 6px; }
+.pd-kpi { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
+  box-shadow: var(--fc-shadow); padding: 12px 14px; min-width: 0; }
+.pd-kpi-label { font-size: .76rem; color: var(--fc-muted); font-weight: 600; }
+.pd-kpi-value { font-size: 1.7rem; font-weight: 800; letter-spacing: -.02em; color: var(--fc-text); line-height: 1.15;
+  margin-top: 4px; }
+.pd-kpi-sub { font-size: .74rem; color: var(--fc-muted); margin-top: 4px; line-height: 1.45; }
+
+/* -- Calibración: el modelo (azul) contra el mercado (gris) y la diagonal perfecta -- */
+.pd-card { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
+  box-shadow: var(--fc-shadow); padding: 14px 16px; }
+.pd-cal-legend { display: flex; gap: 6px 16px; flex-wrap: wrap; font-size: .76rem; color: var(--fc-muted); margin-bottom: 4px; }
+.pd-cal-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.pd-key { width: 18px; height: 2px; border-radius: 1px; display: inline-block; }
+.pd-cal-svg { width: 100%; height: auto; display: block; }
+.pd-mini { width: 100%; border-collapse: collapse; font-size: .8rem; font-variant-numeric: tabular-nums; }
+.pd-mini th { text-align: right; font-size: .66rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--fc-faint); padding: 0 0 6px; border-bottom: 1px solid var(--fc-border); }
+.pd-mini th:first-child, .pd-mini td:first-child { text-align: left; }
+.pd-mini td { text-align: right; padding: 6px 0; border-bottom: 1px solid var(--fc-border); color: var(--fc-text); }
+.pd-mini td small { color: var(--fc-muted); font-size: .72rem; }
+.pd-mini tr:last-child td { border-bottom: none; }
+
+/* -- Historial: últimos partidos con el pronóstico y si acertó -- */
+.pd-hist { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
+  box-shadow: var(--fc-shadow); overflow: hidden; }
+.pd-hist-row { display: grid; grid-template-columns: 84px minmax(0, 1fr) minmax(130px, auto) 74px; gap: 12px;
+  align-items: center; padding: 9px 16px; border-bottom: 1px solid var(--fc-border); font-size: .86rem; }
+.pd-hist-row:last-child { border-bottom: none; }
+.pd-hist-date { color: var(--fc-muted); font-size: .78rem; white-space: nowrap; }
+.pd-hist-match { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fc-text); }
+.pd-hist-match .sc { font-weight: 800; font-variant-numeric: tabular-nums; margin: 0 6px; }
+.pd-hist-pick { justify-self: end; }
+.pd-hist-res { justify-self: end; }
 
 /* -- Tabla de partidos: cada fila se despliega con el análisis -- */
 .pd-table { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
@@ -218,6 +259,12 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
 
 /* -- Móvil: cada fila en dos líneas (hora · equipos · pronóstico / barra · over) y destacados deslizables -- */
 @media (max-width: 760px) {
+  .pd-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .pd-kpi-value { font-size: 1.45rem; }
+  .pd-hist-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "match res" "date pick"; gap: 4px 10px;
+    padding: 10px 14px; }
+  .pd-hist-match { grid-area: match; } .pd-hist-res { grid-area: res; }
+  .pd-hist-date { grid-area: date; } .pd-hist-pick { grid-area: pick; }
   .pd-cols { display: none; }
   .pd-row > summary { grid-template-columns: 48px minmax(0, 1fr) 96px; grid-template-areas:
       "time teams pick" "probs probs over"; gap: 8px 10px; padding: 10px 12px; }
@@ -979,55 +1026,132 @@ def _backtest_row(code: str, r: backtest.BacktestResult) -> dict:
     }
 
 
-def section_performance() -> None:
-    st.markdown(
-        "<div class='pd-note'>Cada modelo se valida con el 30% más reciente de su histórico (partidos que no "
-        "usó para ajustarse) y se compara con las <b>cuotas de cierre</b> de esos mismos "
-        "partidos (football-data.co.uk; en copas y ligas que no cubre, las que ESPN guarda desde finales de "
-        "2025): la referencia más exigente, porque recogen toda la información del mercado justo antes del "
-        "inicio. Log loss: menor es mejor.</div>", unsafe_allow_html=True)
-    with st.container(key="pd_perf_form"):
-        code = st.selectbox("Liga o copa", ORDERED_CODES, key="pd_perf_code",
-                            format_func=lambda c: f"{comps.BY_CODE[c].name} · "
-                                                  f"{'cuotas históricas' if fd.has_odds(c) else 'cuotas recientes'}")
-    model = _model_or_error(code)
-    if model is None:
-        return
+def _short_date(ts: pd.Timestamp, tz: str) -> str:
+    d = _local(ts, tz)
+    return f"{WEEKDAYS_SHORT[d.weekday()]} {d.day} {MONTHS_SHORT[d.month - 1]}"
+
+
+def _outcome_name(k: int, home: str, away: str) -> str:
+    return (f"1 · {home}", "X · Empate", f"2 · {away}")[k]
+
+
+def _kpis_html(tiles: list[tuple[str, str, str]]) -> str:
+    return "<div class='pd-kpis'>" + "".join(
+        f"<div class='pd-kpi'><div class='pd-kpi-label'>{_esc(label)}</div><div class='pd-kpi-value'>{_esc(value)}</div>"
+        f"<div class='pd-kpi-sub'>{_esc(sub)}</div></div>" for label, value, sub in tiles) + "</div>"
+
+
+def _calibration_svg(model: pd.DataFrame, market: pd.DataFrame | None) -> str:
+    """Calibración en SVG con los colores del tema (cambian solos entre claro y oscuro): el modelo en azul,
+    el mercado en gris con marcadores huecos, la diagonal perfecta tenue. Cada punto tiene un área de 24px
+    con su tooltip (<title>)."""
+    w, h, ml, mr, mt, mb = 420, 312, 40, 70, 24, 42
+    px = lambda v: ml + v * (w - ml - mr)  # noqa: E731
+    py = lambda v: h - mb - v * (h - mt - mb)  # noqa: E731
+    parts = [f"<svg class='pd-cal-svg' viewBox='0 0 {w} {h}' role='img' "
+             "aria-label='Calibración: lo que decía la probabilidad frente a lo que pasó'>"]
+    for v in (0, 0.25, 0.5, 0.75, 1):
+        parts.append(f"<line x1='{px(0)}' x2='{px(1)}' y1='{py(v):.1f}' y2='{py(v):.1f}' "
+                     "style='stroke: var(--fc-border); stroke-width: 1'/>")
+        parts.append(f"<line x1='{px(v):.1f}' x2='{px(v):.1f}' y1='{py(0)}' y2='{py(1)}' "
+                     "style='stroke: var(--fc-border); stroke-width: 1'/>")
+        parts.append(f"<text x='{ml - 7}' y='{py(v) + 4:.1f}' text-anchor='end' "
+                     f"style='fill: var(--fc-faint); font-size: 11px'>{v:.0%}</text>")
+        parts.append(f"<text x='{px(v):.1f}' y='{h - mb + 16}' text-anchor='middle' "
+                     f"style='fill: var(--fc-faint); font-size: 11px'>{v:.0%}</text>")
+    parts.append(f"<text x='{px(0.5):.1f}' y='{h - 6}' text-anchor='middle' style='fill: var(--fc-muted); "
+                 "font-size: 11px'>Lo que decía la probabilidad</text>")
+    parts.append("<text x='4' y='11' style='fill: var(--fc-muted); font-size: 11px'>Lo que pasó</text>")
+    parts.append(f"<line x1='{px(0)}' y1='{py(0)}' x2='{px(1)}' y2='{py(1)}' "
+                 "style='stroke: var(--fc-border-strong); stroke-width: 1.5'/>")
+    parts.append(f"<text x='{px(1) + 6}' y='{py(1) + 4:.1f}' style='fill: var(--fc-faint); font-size: 11px'>Perfecto</text>")
+
+    labels = []
+    series = [("Mercado", market, "var(--pd-ref)", True), ("Modelo", model, "var(--pd-home)", False)]
+    for name, df, color, hollow in series:
+        if df is None or df.empty:
+            continue
+        pts = [(px(r.predicted), py(r.observed), r) for r in df.itertuples()]
+        parts.append("<polyline fill='none' points='" + " ".join(f"{x:.1f},{y:.1f}" for x, y, _ in pts) +
+                     f"' style='stroke: {color}; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round'/>")
+        for x, y, r in pts:
+            fill = "var(--fc-surface)" if hollow else color
+            ring = color if hollow else "var(--fc-surface)"
+            tip = f"{name}: decía {r.predicted:.0%} → pasó {r.observed:.0%} ({r.n} casos)"
+            parts.append(f"<g><title>{_esc(tip)}</title><circle cx='{x:.1f}' cy='{y:.1f}' r='12' "
+                         "style='fill: transparent'/>"
+                         f"<circle cx='{x:.1f}' cy='{y:.1f}' r='4.5' style='fill: {fill}; stroke: {ring}; "
+                         "stroke-width: 2'/></g>")
+        labels.append([name, pts[-1][1], color])
+    if len(labels) == 2 and abs(labels[0][1] - labels[1][1]) < 14:  # etiquetas finales sin pisarse
+        lo, hi = sorted(labels, key=lambda lb: lb[1])
+        lo[1], hi[1] = lo[1] - 7, hi[1] + 7
+    for name, y, color in labels:
+        parts.append(f"<line x1='{px(1) + 4}' x2='{px(1) + 14}' y1='{y:.1f}' y2='{y:.1f}' "
+                     f"style='stroke: {color}; stroke-width: 2'/>"
+                     f"<text x='{px(1) + 18}' y='{y + 4:.1f}' style='fill: var(--fc-text); font-size: 11px; "
+                     f"font-weight: 600'>{name}</text>")
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _calibration_html(model: pd.DataFrame, market: pd.DataFrame | None) -> str:
+    legend = ["<span><i class='pd-key' style='background: var(--pd-home)'></i>Modelo</span>"]
+    if market is not None and not market.empty:
+        legend.append("<span><i class='pd-key' style='background: var(--pd-ref)'></i>Mercado (cuotas de cierre)</span>")
+    legend.append("<span><i class='pd-key' style='background: var(--fc-border-strong)'></i>Perfecto</span>")
+    return (f"<div class='pd-card'><div class='pd-cal-legend'>{''.join(legend)}</div>"
+            f"{_calibration_svg(model, market)}</div>")
+
+
+def _calibration_table(model: pd.DataFrame, market: pd.DataFrame | None) -> str:
+    """Los mismos números del gráfico, como tabla (también para leerlos sin pasar el mouse)."""
+    has_market = market is not None and not market.empty
+    head = "<tr><th>Decía</th><th>Modelo: pasó</th>" + ("<th>Mercado: pasó</th>" if has_market else "") + "</tr>"
+    rows = []
+    for r in model.itertuples():
+        cells = (f"<td>{r.lo:.0%}–{r.hi:.0%}</td><td>{r.observed:.0%} <small>({r.predicted:.0%} · {r.n})</small></td>")
+        if has_market:
+            m = market[(market["lo"] == r.lo)]
+            cells += (f"<td>{m['observed'].item():.0%} <small>({m['predicted'].item():.0%} · {m['n'].item()})</small></td>"
+                      if len(m) else "<td>—</td>")
+        rows.append(f"<tr>{cells}</tr>")
+    return f"<div class='pd-card'><table class='pd-mini'>{head}{''.join(rows)}</table></div>"
+
+
+def _history_html(hist: pd.DataFrame, tz: str) -> str:
+    rows = []
+    for r in hist.itertuples():
+        score = f"{int(r.hg)}-{int(r.ag)}" if pd.notna(r.hg) and pd.notna(r.ag) else "–"
+        pick = f"<span class='pd-pill pick'>{_esc(_outcome_name(int(r.pick), r.home, r.away))} · {r.p_pick:.0%}</span>"
+        res = "<span class='pd-pill ok'>Acertó</span>" if r.hit else "<span class='pd-pill miss'>Falló</span>"
+        rows.append(f"<div class='pd-hist-row'><span class='pd-hist-date'>{_short_date(r.datetime, tz)}</span>"
+                    f"<span class='pd-hist-match'>{_esc(r.home)}<span class='sc'>{score}</span>{_esc(r.away)}</span>"
+                    f"<span class='pd-hist-pick'>{pick}</span><span class='pd-hist-res'>{res}</span></div>")
+    return f"<div class='pd-hist'>{''.join(rows)}</div>"
+
+
+def _technical_details(model: mm.LeagueModel, r: backtest.BacktestResult | None) -> None:
     t = model.trained
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Log loss del modelo", f"{t.ll_model:.4f}", help=f"{t.n_val} partidos de validación ({t.val_period})")
-    c2.metric("Referencia (frecuencias 1/X/2)", f"{t.ll_baseline:.4f}")
-    c3.metric("Mejora sobre la referencia", f"{t.ll_baseline - t.ll_model:+.4f}")
+    st.markdown(f"**Log loss 1X2** (mide qué probabilidad le dio el modelo a lo que pasó; menor es mejor): modelo "
+                f"{t.ll_model:.4f} · referencia que predice siempre las frecuencias de 1/X/2 {t.ll_baseline:.4f} · "
+                f"{t.n_val} partidos ({t.val_period}).")
     market = (f"mercado {t.market_weight:.0%} ({model.data.market_coverage:.0%} de partidos con cuotas en 12 "
               f"meses) · " if t.market_weight else "sin señal de mercado · ")
     st.caption(f"Parámetros elegidos con datos: {market}señal {model.data.signal_name} {t.signal_weight:.0%} / goles "
                f"{1 - t.signal_weight:.0%} · Dixon-Coles ρ {t.rho:+.3f} · total de goles {t.total_shrink:.0%} propio "
                f"/ {1 - t.total_shrink:.0%} media · recién llegados ×{t.newcomer[0]:.2f} goles, ×{t.newcomer[1]:.2f} "
                f"rival.")
-
-    with st.spinner("Comparando con las cuotas de cierre…"):
-        try:
-            r = _backtest(code)
-        except mm.PredictionError as exc:
-            st.warning(str(exc))
-            r = None
     if r is not None:
-        st.markdown(f"**Contra el mercado** · {r.n_matched} partidos ({r.period}) · cuotas: {r.odds_source}")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Modelo", f"{r.ll_model:.4f}")
-        m2.metric("Mercado (cierre)", f"{r.ll_market:.4f}")
-        m3.metric("Distancia", f"{r.gap:+.4f}", help="Log loss modelo − mercado: negativo = mejor que el cierre")
-        m4.metric("Peso en la mezcla", f"{r.alpha:.0%}",
-                  help="Mezcla modelo + mercado con menor log loss. ~0% = el modelo no añade información "
-                       f"al cierre (log loss de la mezcla, con validación cruzada: {r.ll_blend_cv:.4f}).")
+        st.markdown(f"**Contra el cierre** · {r.n_matched} partidos ({r.period}) · cuotas: {r.odds_source}: modelo "
+                    f"{r.ll_model:.4f} · mercado {r.ll_market:.4f} · distancia {r.gap:+.4f} · peso del modelo en la "
+                    f"mejor mezcla {r.alpha:.0%} (mezcla con validación cruzada {r.ll_blend_cv:.4f}).")
         if r.ll_ou_model is not None:
-            st.caption(f"Over/Under 2.5 ({r.n_ou} partidos): modelo {r.ll_ou_model:.4f} · mercado "
-                       f"{r.ll_ou_market:.4f}.")
-        st.markdown("ROI simulado apostando 1 unidad a la cuota de cierre cuando el modelo da al menos "
-                    "el umbral de puntos más que el mercado (orientativo: muestras pequeñas, mucho ruido):")
+            st.caption(f"Over/Under 2.5 ({r.n_ou} partidos): modelo {r.ll_ou_model:.4f} · mercado {r.ll_ou_market:.4f}.")
+        st.markdown("ROI simulado apostando 1 unidad a la cuota de cierre cuando el modelo da al menos el umbral de "
+                    "puntos más que el mercado (orientativo: muestras pequeñas, mucho ruido):")
         roi = r.roi.assign(ROI=r.roi["ROI"].map(lambda x: f"{x * 100:+.1f}%" if pd.notna(x) else "—"))
         st.dataframe(roi, hide_index=True, width="stretch")
-
     if st.button("Resumen de todas las competiciones", icon=":material/table_chart:"):
         rows, skipped = [], []
         bar = st.progress(0.0)
@@ -1042,6 +1166,83 @@ def section_performance() -> None:
             st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
         if skipped:
             st.caption("Sin backtest: " + "; ".join(skipped))
+
+
+def section_performance(tz: str) -> None:
+    with st.container(key="pd_perf_form"):
+        code = st.selectbox("Liga o copa", ORDERED_CODES, key="pd_perf_code",
+                            format_func=lambda c: f"{comps.BY_CODE[c].name} · "
+                                                  f"{'cuotas históricas' if fd.has_odds(c) else 'cuotas recientes'}")
+    model = _model_or_error(code)
+    if model is None:
+        return
+    t = model.trained
+    val = t.val_predictions
+    focus = val[val["competition"] == code]
+    pooled = len(focus) < 30  # copas con pocos partidos propios: se mide con las ligas de sus equipos
+    if pooled:
+        focus = val
+    with st.spinner("Comparando con las cuotas de cierre…"):
+        try:
+            r = _backtest(code)
+        except mm.PredictionError:
+            r = None
+    matched = r.matched if r is not None else None
+
+    p, y = perf.model_probs(focus), perf.outcomes(focus)
+    hits = perf.hit_rate(p, y)
+    fav, fav_mean = perf.favorites(p, y)
+    hist = perf.history(focus)
+    st.markdown(
+        f"<div class='pd-note'>Cómo le fue al modelo en los <b>{len(focus)} partidos más recientes</b> "
+        f"({_esc(t.val_period)}), que no usó para ajustarse: cada pronóstico se hizo solo con lo que se sabía antes "
+        f"del partido{' (incluye las ligas de sus equipos)' if pooled else ''}.</div>", unsafe_allow_html=True)
+
+    tiles = [("Aciertos del modelo", f"{hits.share:.0%}",
+              f"el resultado más probable salió en {hits.hits} de {hits.n} partidos")]
+    if matched is not None and len(matched):
+        ym = perf.outcomes(matched)
+        m_hits, same = perf.hit_rate(perf.market_probs(matched), ym), perf.hit_rate(perf.model_probs(matched), ym)
+        tiles.append(("Aciertos del mercado", f"{m_hits.share:.0%}",
+                      f"cuotas de cierre en {m_hits.n} de esos partidos (el modelo, {same.share:.0%})"))
+    else:
+        tiles.append(("Aciertos del mercado", "—", "sin cuotas de cierre suficientes para comparar"))
+    tiles.append(("Favoritos claros", f"{fav.share:.0%}" if fav.n else "—",
+                  f"ganaron {fav.hits} de {fav.n} con 65% o más; el modelo les daba {fav_mean:.0%}" if fav.n
+                  else "ningún partido con 65% o más"))
+    record = perf.pick_record(matched) if matched is not None else None
+    if record is not None and len(record):
+        roi = record["profit"].sum() / len(record)
+        tiles.append(("Picks del modelo", f"{record['won'].mean():.0%}",
+                      f"ganaron {int(record['won'].sum())} de {len(record)} · ROI {roi:+.1%} a cuota de cierre"))
+    else:
+        tiles.append(("Picks del modelo", "—", "sin picks con cuotas de cierre en este periodo"))
+    st.markdown(_kpis_html(tiles), unsafe_allow_html=True)
+
+    _section_title("¿Las probabilidades son realistas?", "Si dice 60%, debería pasar 6 de cada 10 veces")
+    if matched is not None and len(matched) >= 50:
+        cal_model = perf.calibration(perf.model_probs(matched), perf.outcomes(matched))
+        cal_market = perf.calibration(perf.market_probs(matched), perf.outcomes(matched))
+    else:
+        cal_model, cal_market = perf.calibration(p, y), None
+    left, right = st.columns([1.35, 1])
+    with left:
+        st.markdown(_calibration_html(cal_model, cal_market), unsafe_allow_html=True)
+    with right:
+        st.markdown(_calibration_table(cal_model, cal_market), unsafe_allow_html=True)
+        st.markdown("<div class='pd-note' style='margin-top:8px'>Cada fila junta las probabilidades de un tramo "
+                    "(los tres resultados de cada partido). Entre paréntesis, lo que decía en promedio y cuántos "
+                    "casos hay. Cuanto más cerca de la diagonal, más creíbles los porcentajes.</div>",
+                    unsafe_allow_html=True)
+
+    recent = hist[hist["datetime"] >= hist["datetime"].max() - pd.Timedelta(days=30)] if len(hist) else hist
+    note = (f"Acertó {int(recent['hit'].sum())} de {len(recent)} en los últimos 30 días ({recent['hit'].mean():.0%})"
+            if len(recent) else "")
+    _section_title("Últimos partidos", note)
+    st.markdown(_history_html(hist.head(15), tz), unsafe_allow_html=True)
+
+    with st.expander("Detalles técnicos: log loss, parámetros y ROI"):
+        _technical_details(model, r)
 
 
 # ---------------------------------------------------------------------------
@@ -1067,6 +1268,6 @@ view = st.segmented_control("Sección", ["Partidos", "Analizar", "Rendimiento"],
 if view == "Analizar":
     section_manual(tz)
 elif view == "Rendimiento":
-    section_performance()
+    section_performance(tz)
 else:
     section_today(tz)
