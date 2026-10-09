@@ -10,10 +10,9 @@ los primitivos nativos de Streamlit directamente en `app.py`.
 Paleta: azul, verde, blanco y gris (pedido explícito del usuario), con roles
 fijos (fondo, tinta primaria/secundaria, bordes) para que todo el dashboard
 se sienta consistente. `TOKENS` publica esos roles como variables CSS
-(`--fc-*`) que comparten todas las páginas. Las tarjetas usan un fondo claro explícito a propósito
-—no reaccionan al tema Light/Dark de Streamlit— porque así se leen igual de
-bien sobre cualquiera de los dos fondos, en vez de intentar adivinar el
-contraste correcto para cada combinación.
+(`--fc-*`) que comparten todas las páginas, y `DARK_TOKENS` sus valores en modo
+oscuro. Los componentes propios siguen al tema activo de Streamlit (claro u
+oscuro, ver `theme_toggle_html`), con el del sistema como respaldo al cargar.
 """
 
 from __future__ import annotations
@@ -92,6 +91,19 @@ GRID = "#EEF2F7"            # líneas de cuadrícula de los gráficos
 FONT = "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif"
 
 
+# Íconos del botón de tema (trazos de 24×24).
+MOON_PATHS = "<path d='M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z'/>"
+SUN_PATHS = ("<circle cx='12' cy='12' r='4'/><path d='M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2"
+             "M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'/>")
+
+
+def _svg_url(paths: str) -> str:
+    """SVG de trazo como data URI para una máscara CSS (el color lo pone `background`)."""
+    svg = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' "
+           f"stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>{paths}</svg>")
+    return "data:image/svg+xml," + svg.replace("<", "%3C").replace(">", "%3E")
+
+
 def inject_global_css() -> str:
     """CSS global: variables del sistema visual, chrome de Streamlit, tabs,
     botones y las clases `.fp-*` que usan los componentes de este módulo."""
@@ -100,7 +112,28 @@ def inject_global_css() -> str:
     return f"""
     <style>
     :root {{ {tokens} }}
-    @media (prefers-color-scheme: dark) {{ :root {{ {dark} color-scheme: dark; }} }}
+    /* Modo oscuro: el que aplica Streamlit (data-fc-theme, ver theme_toggle_html); antes de que el
+       script lo marque, el del sistema. */
+    :root[data-fc-theme="dark"] {{ {dark} color-scheme: dark; }}
+    @media (prefers-color-scheme: dark) {{ :root:not([data-fc-theme]) {{ {dark} color-scheme: dark; }} }}
+
+    /* -- Botón de tema (arriba a la derecha, en todas las páginas) -- */
+    .st-key-fc_theme {{ position: fixed; top: 0.55rem; right: 0.75rem; z-index: 1000002; width: auto !important; }}
+    .fc-theme-btn {{
+        display: inline-flex; align-items: center; justify-content: center; width: 2.25rem; height: 2.25rem;
+        padding: 0; border-radius: 999px; cursor: pointer; color: var(--fc-text);
+        background: var(--fc-surface); border: 1px solid var(--fc-border); box-shadow: var(--fc-shadow);
+    }}
+    .fc-theme-btn:hover {{ border-color: var(--fc-muted); }}
+    .fc-theme-btn:focus-visible {{ outline: 2px solid var(--fc-blue); outline-offset: 2px; }}
+    /* Ícono como máscara (st.html quita los <svg>): luna en modo claro, sol en modo oscuro. */
+    .fc-theme-btn::before {{
+        content: ""; width: 1.1rem; height: 1.1rem; background: currentColor;
+        -webkit-mask: var(--fc-theme-icon) center / contain no-repeat; mask: var(--fc-theme-icon) center / contain no-repeat;
+    }}
+    :root {{ --fc-theme-icon: url("{_svg_url(MOON_PATHS)}"); }}
+    :root[data-fc-theme="dark"] {{ --fc-theme-icon: url("{_svg_url(SUN_PATHS)}"); }}
+    @media (prefers-color-scheme: dark) {{ :root:not([data-fc-theme]) {{ --fc-theme-icon: url("{_svg_url(SUN_PATHS)}"); }} }}
 
     /* -- Chrome de Streamlit: fuera el menú, el botón Deploy, las acciones de la
        barra (Share, GitHub… de Streamlit Cloud) y el footer. Se mantienen el botón
@@ -273,6 +306,59 @@ def inject_global_css() -> str:
     .fp-step-text {{ font-size: 13px; color: var(--fc-muted); margin-top: 2px; line-height: 1.45; }}
     </style>
     """
+
+
+# Páginas de la app (url_path de st.navigation en app.py; "" es la de inicio): el tema elegido se
+# guarda para todas, porque Streamlit lo recuerda por ruta.
+APP_PAGES = ("", "partidos", "predictor", "fc27")
+
+
+def theme_toggle_html() -> str:
+    """Botón luna/sol que cambia entre modo claro y oscuro, más el script que marca la página
+    con el tema que aplica Streamlit (`data-fc-theme` en <html>) para que los colores propios
+    lo sigan. Va en `st.html(..., unsafe_allow_javascript=True)`.
+
+    Streamlit guarda el tema elegido en el navegador (`localStorage`, clave
+    `stActiveTheme-<ruta>-v2` con "Light", "Dark" o "System") y lo aplica al cargar: el botón
+    escribe esa clave y recarga la página. El tema activo se deduce del fondo de la app, así
+    también se respeta el elegido desde el menú de Streamlit o el del sistema."""
+    pages = ", ".join(f'"{p}"' for p in APP_PAGES)
+    return f"""
+<button type="button" id="fc-theme-btn" class="fc-theme-btn" title="Modo oscuro" aria-label="Activar modo oscuro"></button>
+<script>
+(() => {{
+  if (window.__fcTheme) {{ window.__fcTheme.sync(); return; }}
+  const PAGES = [{pages}];
+  const isDark = () => {{
+    const app = document.querySelector('[data-testid="stApp"]') || document.body;
+    const rgb = (getComputedStyle(app).backgroundColor.match(/[\\d.]+/g) || []).map(Number);
+    if (rgb.length < 3 || rgb[3] === 0) return window.matchMedia("(prefers-color-scheme: dark)").matches;
+    return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] < 128;
+  }};
+  const sync = () => {{
+    const dark = isDark(), root = document.documentElement, want = dark ? "dark" : "light";
+    if (root.dataset.fcTheme !== want) root.dataset.fcTheme = want;
+    const btn = document.getElementById("fc-theme-btn");
+    if (btn) {{
+      const label = dark ? "Modo claro" : "Modo oscuro";
+      if (btn.title !== label) {{ btn.title = label; btn.setAttribute("aria-label", "Activar " + label.toLowerCase()); }}
+    }}
+  }};
+  document.addEventListener("click", (event) => {{
+    if (!event.target.closest || !event.target.closest("#fc-theme-btn")) return;
+    const next = JSON.stringify(isDark() ? "Light" : "Dark");
+    const parts = window.location.pathname.replace(/\\/+$/, "").split("/");
+    const base = PAGES.includes(parts[parts.length - 1]) ? parts.slice(0, -1).join("/") : parts.join("/");
+    const paths = new Set([window.location.pathname, ...PAGES.map((page) => base + "/" + page)]);
+    try {{ paths.forEach((path) => window.localStorage.setItem("stActiveTheme-" + path + "-v2", next)); }} catch (e) {{}}
+    window.location.reload();
+  }});
+  window.__fcTheme = {{ sync }};
+  sync();
+  setInterval(sync, 300);  // el tema también puede cambiar desde el menú de Streamlit o el sistema
+}})();
+</script>
+"""
 
 
 def render_topbar(subtitle: str | None = None) -> str:
