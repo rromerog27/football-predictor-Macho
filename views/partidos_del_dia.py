@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -52,6 +53,10 @@ MONTHS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agost
           "noviembre", "diciembre"]
 HIGHLIGHTS = ["Más claros", "Más parejos", "Vs mercado", "XI confirmados"]
 SORTS = ["Hora", "Liga", "Más claros"]
+VIEWS = ["Partidos", "Picks", "Analizar", "Rendimiento"]
+# La regla de los picks en el backtest de 29 competiciones (8.846 partidos con cuotas de cierre, octubre de 2026):
+# (picks, proporción que ganó, ROI a cuota de cierre). Ver README.
+PICKS_BACKTEST = (753, 0.737, 0.008)
 N_HIGHLIGHTS = 4
 
 PAGE_CSS = """
@@ -157,6 +162,19 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
 .pd-mini td small { color: var(--fc-muted); font-size: .72rem; }
 .pd-mini tr:last-child td { border-bottom: none; }
 
+/* -- Picks: favorito claro del modelo con cuota, mercado y valor -- */
+.pd-picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; margin-bottom: 6px; }
+.pd-pick-card { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
+  box-shadow: var(--fc-shadow); padding: 12px 14px; min-width: 0; }
+.pd-pick-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pd-pick-what { font-size: 1.05rem; font-weight: 800; letter-spacing: -.01em; color: var(--fc-text); margin: 2px 0 10px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-pick-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; border-top: 1px solid var(--fc-border);
+  padding-top: 10px; }
+.pd-pick-grid span { display: block; font-size: .66rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--fc-faint); }
+.pd-pick-grid b { font-size: .98rem; font-weight: 800; color: var(--fc-text); font-variant-numeric: tabular-nums; }
+
 /* -- Historial: últimos partidos con el pronóstico y si acertó -- */
 .pd-hist { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
   box-shadow: var(--fc-shadow); overflow: hidden; }
@@ -261,10 +279,12 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
 @media (max-width: 760px) {
   .pd-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .pd-kpi-value { font-size: 1.45rem; }
-  .pd-hist-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "match res" "date pick"; gap: 4px 10px;
-    padding: 10px 14px; }
+  .pd-hist-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "date res" "match match" "pick pick";
+    gap: 4px 10px; padding: 10px 14px; }
   .pd-hist-match { grid-area: match; } .pd-hist-res { grid-area: res; }
-  .pd-hist-date { grid-area: date; } .pd-hist-pick { grid-area: pick; }
+  .pd-hist-date { grid-area: date; } .pd-hist-pick { grid-area: pick; justify-self: start; max-width: 100%; }
+  .st-key-pd_view button { padding-left: 10px; padding-right: 10px; }
+  .st-key-pd_view button p { font-size: .88rem; }
   .pd-cols { display: none; }
   .pd-row > summary { grid-template-columns: 48px minmax(0, 1fr) 96px; grid-template-areas:
       "time teams pick" "probs probs over"; gap: 8px 10px; padding: 10px 12px; }
@@ -822,7 +842,19 @@ def _section_title(title: str, note: str = "") -> None:
     st.markdown(f"<div class='pd-section'><h3>{_esc(title)}</h3>{note_html}</div>", unsafe_allow_html=True)
 
 
-def section_today(tz: str) -> None:
+@dataclass
+class DayContext:
+    """Partidos del día elegido (con su predicción) y los controles que los eligieron."""
+    day: date
+    items: list[DayItem]
+    models: dict[str, mm.LeagueModel]
+    query: str
+    now: pd.Timestamp
+
+
+def _day_context(tz: str) -> DayContext | None:
+    """Controles (fecha, buscador, ligas) y partidos del día con su predicción; None si no hay qué mostrar
+    (ya se avisó por qué). Lo comparten las vistas Partidos y Picks."""
     if "pd_date" not in st.session_state:  # los botones ‹ › y "próxima fecha" la cambian vía session_state
         st.session_state["pd_date"] = _date_from_url() or pd.Timestamp.now(tz=tz).date()
     for region in comps.REGIONS:  # selección por defecto (vía session_state, sin `default` en el widget)
@@ -845,7 +877,7 @@ def section_today(tz: str) -> None:
     codes = [c for r in comps.REGIONS for c in st.session_state[f"pd_codes_{r}"]]
     if not codes:
         st.markdown("<div class='pd-empty'>Elige al menos una liga o copa.</div>", unsafe_allow_html=True)
-        return
+        return None
 
     start, end = _day_bounds_utc(day, tz)
     selected = tuple(c for c in ORDERED_CODES if c in codes)
@@ -862,7 +894,7 @@ def section_today(tz: str) -> None:
             nxt_day = _local(nxt, tz).date()
             st.button(f"Ir a la próxima fecha con partidos: {_long_date(nxt_day).lower()}", on_click=_jump_to,
                       args=(nxt_day,), icon=":material/event:")
-        return
+        return None
 
     models: dict[str, mm.LeagueModel] = {}
     progress = st.progress(0.0, text="Preparando modelos…") if len(fixtures) > 1 else None
@@ -875,7 +907,7 @@ def section_today(tz: str) -> None:
     if progress:
         progress.empty()
     if not models:
-        return
+        return None
 
     day_rows = []
     for code, model in models.items():
@@ -896,13 +928,24 @@ def section_today(tz: str) -> None:
         except mm.PredictionError as exc:
             error = str(exc)
         items.append(DayItem(_safe_key(row["id"]), code, row, pred, error, *_team_ids(row)))
-    now = mm.utc_now()
-    shown = [it for it in items if _matches_query(it.row, query)]
+    return DayContext(day, items, models, query, mm.utc_now())
 
+
+def _day_summary(ctx: DayContext, tz: str, extra: str = "") -> None:
+    items = ctx.items
     n_leagues = len({it.code for it in items})
-    st.markdown(f"<div class='pd-summary'><b>{_long_date(day)}</b> · {len(items)} partido"
+    st.markdown(f"<div class='pd-summary'><b>{_long_date(ctx.day)}</b> · {len(items)} partido"
                 f"{'' if len(items) == 1 else 's'} en {n_leagues} {'liga' if n_leagues == 1 else 'ligas y copas'} · "
-                f"hora de {_esc(tz.split('/')[-1].replace('_', ' '))}</div>", unsafe_allow_html=True)
+                f"hora de {_esc(tz.split('/')[-1].replace('_', ' '))}{extra}</div>", unsafe_allow_html=True)
+
+
+def section_today(tz: str) -> None:
+    ctx = _day_context(tz)
+    if ctx is None:
+        return
+    items, models, query, now = ctx.items, ctx.models, ctx.query, ctx.now
+    shown = [it for it in items if _matches_query(it.row, query)]
+    _day_summary(ctx, tz)
 
     if query:
         if not shown:
@@ -962,6 +1005,139 @@ def section_today(tz: str) -> None:
         st.markdown("**Validación de los modelos de hoy** (log loss 1X2 en el 30% más reciente del histórico; "
                     "menor es mejor; la referencia es predecir siempre las frecuencias de 1/X/2):")
         st.dataframe(_validation_table(models), hide_index=True, width="stretch")
+
+
+def _pick_what(k: int, home: str, away: str) -> str:
+    return (f"Gana {home}", "Empate", f"Gana {away}")[k]
+
+
+def _result_chip(item: DayItem, k: int) -> str:
+    """Si el partido ya terminó, si el resultado `k` salió; si está en juego, eso; si no, nada."""
+    score = item.pred.final_score if item.pred is not None else None
+    if score is not None:
+        result = 0 if score[0] > score[1] else (1 if score[0] == score[1] else 2)
+        chip = ("<span class='pd-pill ok'>Ganó</span>" if result == k else "<span class='pd-pill miss'>Perdió</span>")
+        return f"{chip} <span class='pd-hl-top'>{score[0]}-{score[1]}</span>"
+    return ""
+
+
+def _picks_html(picks: list[tuple[DayItem, perf.Pick]], tz: str, now: pd.Timestamp) -> str:
+    cards = []
+    for it, pk in picks:
+        status, cls = _status(it, tz, now)
+        when = status if cls or status == "Final" else f"{_local(it.row['datetime'], tz):%H:%M}"
+        teams = "".join(f"<div class='pd-hl-team'>{_crest(tid, name)}<span>{_esc(name)}</span></div>"
+                        for name, tid in ((it.row["home"], it.home_id), (it.row["away"], it.away_id)))
+        cards.append(
+            "<div class='pd-pick-card'>"
+            f"<div class='pd-pick-head'><span class='pd-hl-top'>{_esc(when)} · {_esc(comps.BY_CODE[it.code].name)}</span>"
+            f"{_result_chip(it, pk.outcome)}</div>"
+            f"<div class='pd-hl-teams'>{teams}</div>"
+            f"<div class='pd-pick-what'>{_esc(_pick_what(pk.outcome, it.row['home'], it.row['away']))}</div>"
+            "<div class='pd-pick-grid'>"
+            f"<div><span>Modelo</span><b>{pk.p_model:.0%}</b></div>"
+            f"<div><span>Mercado</span><b>{pk.p_market:.0%}</b></div>"
+            f"<div><span>Cuota</span><b>{pk.odds:.2f}</b></div>"
+            f"<div><span title='Ganancia esperada por unidad si el modelo tuviera razón'>Valor</span>"
+            f"<b>{pk.value:+.0%}</b></div>"
+            "</div></div>")
+    return f"<div class='pd-picks'>{''.join(cards)}</div>"
+
+
+def _avoid_html(avoid: list[tuple[DayItem, int]], tz: str) -> str:
+    rows = []
+    for it, k in avoid:
+        pred = it.pred
+        pm = pred.market["p_1x2"][k]
+        rows.append(
+            f"<div class='pd-hist-row'><span class='pd-hist-date'>{_local(it.row['datetime'], tz):%H:%M} · "
+            f"{_esc(comps.BY_CODE[it.code].name)}</span>"
+            f"<span class='pd-hist-match'>{_esc(it.row['home'])} – {_esc(it.row['away'])}</span>"
+            f"<span class='pd-hist-pick'><span class='pd-pill'>{_esc(_pick_what(k, pred.home, pred.away))}: mercado "
+            f"{pm:.0%} · modelo {pred.p_final[k]:.0%}</span></span>"
+            f"<span class='pd-hist-res'><span class='pd-pill miss'>Evitar</span></span></div>")
+    return f"<div class='pd-hist'>{''.join(rows)}</div>"
+
+
+def _record_html(record: pd.DataFrame, tz: str) -> str:
+    rows = []
+    for r in record.itertuples():
+        score = f"{int(r.hg)}-{int(r.ag)}" if pd.notna(r.hg) and pd.notna(r.ag) else "–"
+        pick = (f"<span class='pd-pill pick'>{_esc(_pick_what(int(r.outcome), r.home, r.away))} · "
+                f"{r.p_model:.0%} · cuota {r.odds:.2f}</span>")
+        res = (f"<span class='pd-pill ok'>+{r.profit:.2f}</span>" if r.won
+               else "<span class='pd-pill miss'>−1</span>")
+        rows.append(f"<div class='pd-hist-row'><span class='pd-hist-date'>{_short_date(r.datetime, tz)}</span>"
+                    f"<span class='pd-hist-match'>{_esc(r.home)}<span class='sc'>{score}</span>{_esc(r.away)}</span>"
+                    f"<span class='pd-hist-pick'>{pick}</span><span class='pd-hist-res'>{res}</span></div>")
+    return f"<div class='pd-hist'>{''.join(rows)}</div>"
+
+
+def section_picks(tz: str) -> None:
+    n_bt, won_bt, roi_bt = PICKS_BACKTEST
+    st.markdown(
+        f"<div class='pd-note'><b>Pick:</b> favorito del modelo con {perf.FAVORITE_MIN:.0%} o más, sin que el mercado "
+        f"le dé más. <b>No es una recomendación de apuesta:</b> en el backtest ({n_bt} picks) ganaron el {won_bt:.0%}, "
+        f"pero a cuota de cierre quedaron en empate (ROI {roi_bt:+.1%}). Revisá las alineaciones ~1 h antes.</div>",
+        unsafe_allow_html=True)
+    ctx = _day_context(tz)
+    if ctx is None:
+        return
+    items = [it for it in ctx.items if _matches_query(it.row, ctx.query)]
+    picks, avoid, no_odds = [], [], 0
+    for it in items:
+        pred = it.pred
+        if pred is None:
+            continue
+        if not pred.market:
+            no_odds += 1
+            continue
+        odds = np.array([pd.to_numeric(it.row.get(c), errors="coerce") for c in ("odds_h", "odds_d", "odds_a")], float)
+        pm = np.asarray(pred.market["p_1x2"], float)
+        pk = perf.find_pick(pred.p_final, pm, odds)
+        if pk is not None:
+            picks.append((it, pk))
+        k = perf.find_avoid(pred.p_final, pm)
+        if k is not None:
+            avoid.append((it, k))
+    _day_summary(ctx, tz, f" · {no_odds} sin cuotas" if no_odds else "")
+
+    _section_title(f"Picks ({len(picks)})", "Ordenados por valor según el modelo")
+    if picks:
+        picks.sort(key=lambda x: -x[1].value)
+        st.markdown(_picks_html(picks, tz, ctx.now), unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='pd-empty'>Ningún partido cumple la regla en este día: no hay un favorito claro del "
+                    "modelo que el mercado no vea igual o más claro.</div>", unsafe_allow_html=True)
+    if avoid:
+        _section_title(f"Para evitar ({len(avoid)})", "El mercado ve un favorito claro y el modelo bastante menos")
+        st.markdown(_avoid_html(avoid, tz), unsafe_allow_html=True)
+
+    _section_title("Cómo les fue a los picks", "Partidos ya jugados, a cuota de cierre")
+    codes = sorted(ctx.models, key=ORDERED_CODES.index)
+    if st.button(f"Ver los picks de los últimos 30 días ({len(codes)} competiciones de este día)",
+                 icon=":material/history:", key="pd_pick_record"):
+        records, bar = [], st.progress(0.0)
+        for n, code in enumerate(codes, start=1):
+            bar.progress(n / len(codes), text=f"{comps.BY_CODE[code].name} ({n}/{len(codes)})…")
+            try:
+                rec = perf.pick_record(_backtest(code).matched)
+            except mm.PredictionError:
+                continue
+            if len(rec):
+                records.append(rec[rec["datetime"] >= rec["datetime"].max() - pd.Timedelta(days=30)])
+        bar.empty()
+        record = (pd.concat(records, ignore_index=True).sort_values("datetime", ascending=False)
+                  if records else pd.DataFrame())
+        if record.empty:
+            st.markdown("<div class='pd-empty'>Sin picks con cuotas de cierre en los últimos 30 días de estas "
+                        "competiciones.</div>", unsafe_allow_html=True)
+        else:
+            profit = record["profit"].sum()
+            st.markdown(f"<div class='pd-summary'>Ganaron <b>{int(record['won'].sum())} de {len(record)}</b> "
+                        f"({record['won'].mean():.0%}) · {profit:+.1f} unidades apostando 1 a cada uno "
+                        f"(ROI {profit / len(record):+.1%})</div>", unsafe_allow_html=True)
+            st.markdown(_record_html(record.head(40), tz), unsafe_allow_html=True)
 
 
 def section_manual(tz: str) -> None:
@@ -1262,10 +1438,12 @@ st.markdown(
 with st.sidebar:
     tz = st.selectbox("Zona horaria", tz_options, index=tz_options.index(default_tz), key="pd_tz",
                       help="Por defecto, la de tu navegador. Define qué partidos son \"del día\" y sus horas.")
-view = st.segmented_control("Sección", ["Partidos", "Analizar", "Rendimiento"], default="Partidos", key="pd_view",
+view = st.segmented_control("Sección", VIEWS, default="Partidos", key="pd_view",
                             required=True, label_visibility="collapsed")
 
-if view == "Analizar":
+if view == "Picks":
+    section_picks(tz)
+elif view == "Analizar":
     section_manual(tz)
 elif view == "Rendimiento":
     section_performance(tz)
