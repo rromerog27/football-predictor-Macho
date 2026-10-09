@@ -604,6 +604,16 @@ Resultado en 7.325 partidos de las 21 competiciones:
     1 o 4 partidos de suavizado inicial (±0.0001).
   - xG real de Understat en lugar del aproximado: en las 5 grandes da lo
     mismo (−0.0009 ± 0.0015), así que llevarlo a las copas no cambiaría nada.
+  - Descendidos en las segundas divisiones (Championship, LaLiga 2,
+    2. Bundesliga, Serie B, Ligue 2): meter la primera división en el
+    cálculo de fuerzas empeora (+0.003, y sobre todo en los partidos sin
+    descendidos: mezclar divisiones cambia las referencias de todos los
+    equipos; Serie B +0.012). Usarla solo para reconocer a los descendidos
+    y darles una calibración propia también empeora (+0.0014; Ligue 2
+    +0.011): con 2 o 3 descendidos por temporada y liga, lo que se aprende
+    es ruido. En 88 partidos de validación con un descendido, este ganó el
+    42,0%; el modelo le daba 41,4% y el mercado 44,7%. El modelo no los
+    subestima: el mercado los sobrevalora.
   - La calibración ya es buena (empates y favoritos salen con frecuencias
     muy cercanas a las reales, igual que en el mercado) y mezclar el modelo
     con las cuotas no mejora a las cuotas solas (+0.0014): la distancia al
