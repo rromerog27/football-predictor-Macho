@@ -148,6 +148,7 @@ football_predictor/
 │   ├── espn_source.py          # Descarga de ESPN (resultados, tiros, calendario, cuotas)
 │   ├── football_data_source.py # Descarga de football-data.co.uk (cuotas de cierre: señal de mercado y backtest)
 │   ├── market_signal.py        # Goles esperados implícitos en las cuotas de cierre de partidos anteriores
+│   ├── lineups.py              # Alineaciones de ESPN: rotación de cada equipo y ajuste del 1X2
 │   ├── backtest.py             # Backtest de las predicciones de validación contra las cuotas de cierre
 │   ├── visualizations.py       # Construcción de gráficos Plotly
 │   └── utils.py                 # Utilidades comunes (safe_divide, logging, formateo)
@@ -183,6 +184,7 @@ football_predictor/
 | `src/understat_source.py` | Descarga y caché del xG de Understat, convertido a las columnas estándar del modelo. |
 | `src/football_data_source.py` | Descarga y caché de football-data.co.uk: resultados con cuotas de cierre (Pinnacle o media del mercado, 1X2 y Over/Under), descartando cuotas corruptas. |
 | `src/market_signal.py` | Despeja los goles esperados que implican las cuotas de cierre de cada partido jugado (football-data.co.uk o ESPN), empareja nombres por resultados y los añade como señal de mercado. |
+| `src/lineups.py` | Lee los titulares de ESPN (~1 h antes del partido), mide cuánto rota cada equipo respecto a sus 10 partidos anteriores y ajusta el 1X2 final. |
 | `src/backtest.py` | Cruza las predicciones de validación con las cuotas de cierre (football-data.co.uk o ESPN) y compara log loss, mezcla modelo + mercado, Over/Under y ROI simulado. |
 | `src/espn_source.py` | Descarga y caché del marcador de ESPN (resultados, tiros, calendario, campo neutral, cuotas de DraftKings) y cálculo del xG aproximado con tiros. |
 | `src/visualizations.py` | Construye los gráficos Plotly (barras, radar, evolución de forma, mapas de calor, importancia de variables) a partir de datos ya calculados. |
@@ -384,9 +386,9 @@ python3 modelo_prediccion.py --listar                                           
   pasadas en `odds_<slug>.json`) y `data/football_data_cache/`: lo pasado no
   caduca; la temporada o el año en curso, a las 3 horas (o con
   `--refrescar`). Si una descarga falla, el script se detiene y la página lo
-  avisa: nunca se rellenan datos inventados. El modelo no usa lesiones ni
-  alineaciones del partido; solo le llegan de forma indirecta, a través de
-  las cuotas de cierre de los partidos anteriores.
+  avisa: nunca se rellenan datos inventados. Las lesiones y sanciones solo
+  entran a través de las alineaciones (cuando se publican) y, de forma
+  indirecta, de las cuotas de cierre de los partidos anteriores.
 
 **Recién ascendidos.** En las ligas que tienen segunda división en ESPN
 (las 5 grandes, Championship, Serie B, Eredivisie, Süper Lig, Escocia,
@@ -434,7 +436,20 @@ diría su fuerza en la división inferior.
    la corrección de Dixon-Coles para los marcadores bajos (ρ por máxima
    verosimilitud). De la matriz de marcadores salen el 1X2, el Over/Under
    2.5, ambos anotan y los marcadores más probables.
-6. *Regresión logística multinomial:* reajusta la señal de Poisson
+6. *Alineaciones* (`src/lineups.py`): cuando ESPN publica los titulares
+   (~1 h antes), la rotación de cada equipo es la suma de titularidades
+   (en sus 10 partidos anteriores de la competición) de sus 11 habituales
+   que no salen de titulares, dividida por la de esos 11. El 1X2 final se
+   desplaza en log-odds local/visitante en ±0.85 · (rotación local −
+   rotación visitante) / 2. La diferencia entre el mercado y el modelo
+   correlaciona −0.28/−0.45 con las rotaciones (buena parte de la ventaja
+   del cierre son las alineaciones); con un efecto común a todas las ligas
+   (por liga es demasiado ruidoso), la validación cruzada en dos mitades
+   sobre 5.871 partidos de 17 ligas mejora el log loss en 0.0021. Probado y
+   descartado: anticipar las rotaciones con el calendario (copas a pocos
+   días), que no las predice. Solo en ligas, desde 2 h antes del inicio
+   hasta 3 h después.
+7. *Regresión logística multinomial:* reajusta la señal de Poisson
    (`log(λ local/λ visitante)`, `log(λ total)` y las probabilidades 1X2 de
    Poisson como `log(P local/P empate)` y `log(P visitante/P empate)`) con la
    racha de puntos de los últimos 5 partidos, los últimos 5 en casa del local
@@ -442,7 +457,7 @@ diría su fuerza en la división inferior.
    días, normal 5-7, largo ≥8). Se entrena con instantáneas pre-partido sin
    fuga de información y elige su regularización con validación cruzada
    temporal.
-7. *Ensemble:* el peso Poisson/logística minimiza el log loss en el 30% más
+8. *Ensemble:* el peso Poisson/logística minimiza el log loss en el 30% más
    reciente del histórico, que la logística no vio al entrenar. Para
    Over/Under y ambos anotan, la matriz de Poisson se reescala para que
    reproduzca el 1X2 final.
@@ -499,7 +514,10 @@ Resultado en los mismos 7.328 partidos de las 21 competiciones:
   divisiones inferiores (empeoraba Argentina, Países Bajos y Serie B) y
   añadir a las copas UEFA las ligas que ESPN no tiene (Suiza, Rumanía,
   Polonia, Finlandia e Irlanda, desde football-data: peor en las tres
-  copas).
+  copas), estirar la diferencia local/visitante (−0.0003: incluso la mejor
+  calibración a posteriori gana solo 0.0004, así que la prudencia del
+  modelo con los favoritos es información que no tiene, no mala
+  calibración) y descontar la temporada anterior tras el parón (−0.0001).
 - Versión anterior: variables de Poisson en la logística (−0.0004),
   decaimiento temporal (−0.0006), historial de la división inferior
   (−0.0006), acercamiento del total (Over/Under 0.6851 → 0.6802).

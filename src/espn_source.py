@@ -40,7 +40,7 @@ CURRENT_YEAR_CACHE_TTL_S = 3 * 3600
 XG_PER_SHOT_ON_TARGET = 0.2295
 XG_PER_SHOT_OFF_TARGET = 0.0647
 EXTRA_TIME_STATUSES = {"STATUS_FINAL_AET", "STATUS_FINAL_PEN"}
-_ODDS_LOCKS: dict[str, threading.Lock] = {}  # una descarga de cuotas pasadas por competición a la vez
+_ODDS_LOCKS: dict[str, threading.Lock] = {}  # una descarga de fichas (cuotas, alineaciones) por competición a la vez
 _ODDS_LOCKS_GUARD = threading.Lock()
 DROPPED_STATUS_WORDS = ("POSTPONED", "CANCELED", "CANCELLED", "ABANDONED", "SUSPENDED", "FORFEIT")
 
@@ -180,20 +180,24 @@ def fetch_current(session: requests.Session, slug: str) -> list[dict]:
     return [t for e in _get_events(session, slug, {}) if (t := trim_event(e)) is not None]
 
 
-def _summary_odds(session: requests.Session, slug: str, event_id: str) -> dict | None:
-    """Cuotas previas (DraftKings) de un partido según su ficha de ESPN: 1X2 y la línea de
-    Over/Under que ofrecía (2.5, 3.5...). None si no tiene; lanza si la petición falla."""
+def _summary(session: requests.Session, slug: str, event_id: str) -> dict:
+    """Ficha de un partido de ESPN (`.../summary?event=<id>`); lanza si la petición falla."""
     url = f"{ESPN}/{slug}/summary"
     for attempt in range(3):
         try:
             resp = session.get(url, params={"event": event_id}, headers=HTTP_HEADERS, timeout=30)
             resp.raise_for_status()
-            data = resp.json()
-            break
+            return resp.json()
         except (requests.RequestException, ValueError):
             if attempt == 2:
                 raise
             time.sleep(2**attempt)
+
+
+def _summary_odds(session: requests.Session, slug: str, event_id: str) -> dict | None:
+    """Cuotas previas (DraftKings) de un partido según su ficha de ESPN: 1X2 y la línea de
+    Over/Under que ofrecía (2.5, 3.5...). None si no tiene; lanza si la petición falla."""
+    data = _summary(session, slug, event_id)
     picks = [p for p in data.get("pickcenter") or [] if p]
     if not picks:
         return None
@@ -244,6 +248,45 @@ def _download_odds(slug: str, missing: list[str], cache: dict, cache_file: Path,
             if ok:
                 cache[event_id] = odds
     write_atomic(cache_file, json.dumps(cache))
+
+
+def parse_lineups(summary: dict) -> dict | None:
+    """Titulares de cada equipo en la ficha de ESPN: {"home": [[id, nombre], ...], "away": [...]}.
+    None si ESPN aún no publica las alineaciones (o no las tiene)."""
+    xi = {}
+    for team in summary.get("rosters") or []:
+        starters = [[str(p["athlete"]["id"]), p["athlete"].get("displayName", "")]
+                    for p in team.get("roster") or [] if p.get("starter") and p.get("athlete")]
+        if team.get("homeAway") in ("home", "away") and len(starters) >= 10:
+            xi[team["homeAway"]] = starters
+    return xi if len(xi) == 2 else None
+
+
+def fetch_lineups(slug: str, event_ids: list[str], completed: bool,
+                  session: requests.Session | None = None) -> dict[str, dict | None]:
+    """Titulares de varios partidos (ids de ESPN sin prefijo). Los de partidos terminados se guardan
+    en disco sin caducidad; los de partidos por jugar no (las alineaciones salen ~1 h antes)."""
+    cache_file = CACHE_DIR / f"xi_{slug}.json"
+    with _ODDS_LOCKS_GUARD:
+        lock = _ODDS_LOCKS.setdefault(f"xi:{slug}", threading.Lock())
+    with lock:
+        cache = json.loads(cache_file.read_text(encoding="utf-8")) if completed and cache_file.exists() else {}
+        missing = [e for e in dict.fromkeys(event_ids) if e not in cache]
+        if missing:
+            session = session or requests.Session()
+
+            def job(event_id: str):
+                try:
+                    return event_id, parse_lineups(_summary(session, slug, event_id)), True
+                except (requests.RequestException, ValueError):
+                    return event_id, None, False
+
+            with ThreadPoolExecutor(8) as pool:
+                fetched = {e: xi for e, xi, ok in pool.map(job, missing) if ok}
+            cache.update(fetched)
+            if completed and fetched:
+                write_atomic(cache_file, json.dumps(cache))
+    return {e: cache.get(e) for e in event_ids}
 
 
 def pseudo_xg(shots, sot):

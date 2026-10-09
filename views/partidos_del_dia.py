@@ -27,10 +27,12 @@ import streamlit as st
 from src import backtest
 from src import competitions as comps
 from src import football_data_source as fd
+from src import lineups
 from src import match_model as mm
 
 MODEL_TTL_S = 3 * 3600  # igual que la caché del año/temporada en curso: el modelo ve los resultados nuevos
 DAY_TTL_S = 10 * 60
+LINEUP_TTL_S = 5 * 60  # las alineaciones salen ~1 h antes del inicio: se vuelven a mirar cada 5 minutos
 # Diferencia modelo − mercado que se señala: la media es ~5 puntos por resultado; 10 o más
 # aparece en ~1 de cada 10 partidos (medido en una jornada de 39 partidos con cuotas).
 VALUE_THRESHOLD = 0.10
@@ -184,6 +186,21 @@ def _backtest(code: str) -> backtest.BacktestResult:
     return backtest.run(_competition_model(code))
 
 
+@st.cache_data(ttl=LINEUP_TTL_S, show_spinner=False)
+def _lineups(code: str, event_id: str, home_id: str, away_id: str, kickoff: pd.Timestamp) -> lineups.LineupInfo | None:
+    """Alineaciones del partido (None si ESPN aún no las publica o la consulta falla)."""
+    fixture = pd.Series({"datetime": kickoff, "espn_id": f"espn:{event_id}", "espn_home_id": home_id,
+                         "espn_away_id": away_id})
+    return lineups.fixture_lineups(code, comps.BY_CODE[code].is_cup, fixture)
+
+
+def _row_lineups(code: str, row: pd.Series) -> lineups.LineupInfo | None:
+    refs = lineups.espn_refs(row)
+    if refs is None or comps.BY_CODE[code].is_cup or not lineups.in_window(row["datetime"]):
+        return None
+    return _lineups(code, *refs, row["datetime"])
+
+
 def _model_or_error(code: str) -> mm.LeagueModel | None:
     name = comps.BY_CODE[code].name
     with st.spinner(f"Preparando el modelo de {name} (la primera vez tarda unos segundos)…"):
@@ -283,6 +300,29 @@ def _market_html(pred: mm.MatchPrediction) -> str:
             f"({pred.market['margin'] * 100:.1f}%)'><span class='pd-label'>Mercado</span>{probs}{chip}</div>")
 
 
+def _rotation_text(team) -> str:
+    if team.rotation is None:
+        return "sin historial suficiente"
+    k = len(team.missing)
+    return "once habitual" if k == 0 else f"{k} habitual{'es' if k > 1 else ''} fuera"
+
+
+def _lineup_html(pred: mm.MatchPrediction) -> str:
+    """Aviso de alineaciones confirmadas: rotación de cada equipo y cuánto movió el 1X2."""
+    lu = pred.lineups
+    if lu is None:
+        return ""
+    delta = (pred.p_final - pred.p_before_lineups) * 100
+    moved = "sin cambio"
+    if abs(delta[0]) >= 0.5 or abs(delta[2]) >= 0.5:
+        moved = f"local {delta[0]:+.0f} pts · visitante {delta[2]:+.0f} pts"
+    title = (f"{_esc(pred.home)}: {_esc(', '.join(lu.home.missing) or 'once habitual')} — "
+             f"{_esc(pred.away)}: {_esc(', '.join(lu.away.missing) or 'once habitual')}")
+    return (f"<div class='pd-info' title='Habituales que no son titulares. {title}'>👥 XI confirmados: "
+            f"{_esc(pred.home)} {_rotation_text(lu.home)}, {_esc(pred.away)} {_rotation_text(lu.away)} "
+            f"→ {moved}</div>")
+
+
 def _card_summary_html(pred: mm.MatchPrediction, tz: str, show_date: bool = False) -> str:
     if pred.kickoff is None:
         when = f"Datos al {_local(pred.cutoff, tz):%d/%m}"
@@ -317,7 +357,7 @@ def _card_summary_html(pred: mm.MatchPrediction, tz: str, show_date: bool = Fals
         f"<div class='pd-market' title='Marcador exacto más probable ({p * 100:.1f}%)'>"
         f"<span>Marcador</span><b>{i}-{j}</b></div>"
         "</div>"
-        f"{_market_html(pred)}{warn}"
+        f"{_market_html(pred)}{_lineup_html(pred)}{warn}"
     )
 
 
@@ -353,14 +393,21 @@ def _detail_html(pred: mm.MatchPrediction) -> str:
                    if pred.market and pred.market["over25"] is not None else "")
     url = comps.match_url(pred.match_id)
     link = f"<a href='{url}' target='_blank' rel='noopener'>Ver partido ↗</a>" if url else ""
+    ensemble = pred.p_before_lineups if pred.lineups is not None else pred.p_final
+    lineup_row = row("Con alineaciones", pred.p_final) if pred.lineups is not None else ""
+    lineup_note = ""
+    if pred.lineups is not None:
+        parts = [f"{_esc(name)}: {_esc(', '.join(team.missing)) if team.missing else _rotation_text(team)}"
+                 for name, team in ((pred.home, pred.lineups.home), (pred.away, pred.lineups.away))]
+        lineup_note = f"<div><b>Habituales que no son titulares:</b> {' · '.join(parts)}</div>"
     return (
         "<div class='pd-detail'>"
         "<table><tr><th>Modelo</th><th>1</th><th>X</th><th>2</th></tr>"
         f"{row('Poisson (DC)', pred.p_poisson)}{row('Logística', pred.p_logistic)}"
-        f"{row(f'Ensemble ({t.w_poisson:.0%}/{1 - t.w_poisson:.0%})', pred.p_final)}{market_row}</table>"
+        f"{row(f'Ensemble ({t.w_poisson:.0%}/{1 - t.w_poisson:.0%})', ensemble)}{lineup_row}{market_row}</table>"
         f"{team_block(pred.home, h, att_h, def_h, 'en casa')}"
         f"{team_block(pred.away, a, att_a, def_a, 'fuera')}"
-        f"<div><b>Marcadores más probables:</b> {scores}</div>"
+        f"{lineup_note}<div><b>Marcadores más probables:</b> {scores}</div>"
         f"<div><b>Over 2.5:</b> modelo {pred.over25 * 100:.1f}% (Poisson {pred.over25_poisson * 100:.1f}%)"
         f"{over_market} · <b>Ambos anotan:</b> {pred.btts * 100:.1f}%</div>"
         f"<div style='margin-top:6px'>{link}</div>"
@@ -500,7 +547,8 @@ def section_today(tz: str) -> None:
             row = pd.Series(fixture)
             code = row["_code"]
             try:
-                pred = mm.predict_match(models[code], row["home"], row["away"], fixture=row)
+                pred = mm.predict_match(models[code], row["home"], row["away"], fixture=row,
+                                        lineups=_row_lineups(code, row))
             except mm.PredictionError as exc:
                 with st.container(key=f"pd_card_{_safe_key(row['id'])}"):
                     st.markdown(f"<div class='pd-top'><span class='pd-time'>{_local(row['datetime'], tz):%H:%M}"
@@ -525,6 +573,10 @@ def section_today(tz: str) -> None:
             "21 ligas y sus divisiones inferiores; ESPN, desde finales de 2025, en copas y ligas sudamericanas), "
             "se despejan los goles esperados que implican y entran como tercera señal de fuerza: recogen lo que "
             "el mercado sabía (fichajes, lesiones, alineaciones). Nunca se usan las cuotas del propio partido.\n"
+            "- **Alineaciones:** desde ~1 h antes del inicio, cuando ESPN publica los titulares, se mide cuánto "
+            "rota cada equipo (sus 11 habituales de los 10 partidos anteriores que no salen de titulares, "
+            "pesados por sus titularidades) y se ajusta el 1X2; en validación cruzada sobre 5.871 partidos de "
+            "17 ligas mejora el log loss en 0.002. Solo en ligas.\n"
             "- **Recién ascendidos:** su historial de la división inferior (ESPN) entra en el cálculo de fuerzas, "
             "con una calibración de su nivel estimada con ascensos anteriores.\n"
             "- **Regresión logística:** reajusta la señal de Poisson con la racha de puntos, la localía y el "
@@ -532,9 +584,8 @@ def section_today(tz: str) -> None:
             "- **Mercado del partido:** probabilidades de las cuotas de DraftKings (vía ESPN) sin el margen de la "
             "casa. La etiqueta amarilla marca el resultado al que el modelo da 10 o más puntos más que el mercado; "
             "**no es una recomendación de apuesta**: el mercado suele ser más preciso que cualquier modelo público.\n"
-            "- **No incluye** las lesiones, sanciones ni alineaciones del propio partido (solo, de forma indirecta, "
-            "las que ya reflejaban las cuotas de partidos anteriores); el descanso solo cuenta los partidos de las "
-            "competiciones descargadas.\n"
+            "- **No incluye** lesiones ni sanciones hasta que se conocen los titulares; el descanso solo cuenta "
+            "los partidos de las competiciones descargadas.\n"
             "- En partidos ya jugados, la regresión logística se entrenó con toda la temporada: el "
             "\"acertó/falló\" es orientativo, no un backtest.\n"
             "- Cada modelo se reentrena cada 3 horas con los resultados nuevos."
@@ -574,11 +625,7 @@ def section_manual(tz: str) -> None:
     code, home, away = request
     comp = comps.BY_CODE[code]
     try:
-        pred = mm.predict_match(model, home, away)
-        if comp.understat and pred.match_id is not None:  # cuotas de ESPN para el partido de Understat
-            fixture = comps.understat_fixture_with_odds(comp, model.data, pred.match_id)
-            if fixture is not None:
-                pred = mm.predict_match(model, pred.home, pred.away, fixture=fixture)
+        pred = comps.predict_fixture(comp, model, home, away)
     except mm.PredictionError as exc:
         st.warning(str(exc))
         return

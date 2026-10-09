@@ -595,3 +595,95 @@ def test_backtest_uses_espn_odds_where_football_data_has_none(trained_league, mo
         model.data.competition = "eng.1"
     assert r.odds_source == "DraftKings (ESPN)" and r.n_matched == len(preds)
     assert r.ll_market == pytest.approx(r.ll_model, abs=1e-9)
+
+
+# --------------------------------------------------------------------------
+# Alineaciones (rotaciones del once titular)
+# --------------------------------------------------------------------------
+
+
+def test_rotation_weights_missing_regulars_by_starts():
+    from src import lineups
+    regulars = [f"p{i}" for i in range(11)]
+    previous = [regulars] * 8 + [regulars[:10] + ["sub"]] * 2  # p10 fue titular 8 de 10
+    value, missing = lineups.rotation(previous, set(regulars))
+    assert value == 0.0 and missing == []
+    value, missing = lineups.rotation(previous, set(regulars[2:]) | {"sub", "x"})
+    assert missing == ["p0", "p1"] and value == pytest.approx(20 / (10 * 10 + 8))
+
+
+def test_shift_home_away_moves_probability_to_away():
+    p = np.array([0.5, 0.25, 0.25])
+    assert mm.shift_home_away(p, 0.0) == pytest.approx(p)
+    q = mm.shift_home_away(p, 0.3)
+    assert q.sum() == pytest.approx(1.0) and q[0] < p[0] and q[2] > p[2]
+    assert np.log(q[0] / q[2]) == pytest.approx(np.log(p[0] / p[2]) - 0.6)
+
+
+def test_parse_lineups_needs_both_elevens():
+    def team(side, n):
+        return {"homeAway": side, "roster": [{"starter": i < n, "athlete": {"id": f"{side}{i}", "displayName": f"J{i}"}}
+                                             for i in range(18)]}
+    xi = espn_source.parse_lineups({"rosters": [team("home", 11), team("away", 11)]})
+    assert len(xi["home"]) == 11 and xi["away"][0] == ["away0", "J0"]
+    assert espn_source.parse_lineups({"rosters": [team("home", 11)]}) is None
+    assert espn_source.parse_lineups({"rosters": [team("home", 11), team("away", 3)]}) is None
+    assert espn_source.parse_lineups({}) is None
+
+
+def test_match_lineups_detects_rotation(monkeypatch):
+    from src import lineups
+    kickoff = pd.Timestamp("2026-10-10 15:00")
+    events = [{"id": f"e{k}", "date": f"2026-09-{k + 1:02d}T15:00Z", "completed": True,
+               "home": {"id": "H" if k % 2 == 0 else "X"}, "away": {"id": "A" if k % 2 == 0 else "Y"}}
+              for k in range(12)]
+    events += [{"id": f"f{k}", "date": f"2026-09-{k + 1:02d}T18:00Z", "completed": True,
+                "home": {"id": "Y"}, "away": {"id": "H" if k % 2 else "A"}} for k in range(12)]
+    regular = {t: [[f"{t}{i}", f"{t} jugador {i}"] for i in range(11)] for t in ("H", "A")}
+
+    def fake_lineups(slug, ids, completed, session=None):
+        out = {}
+        for e in ids:
+            if e == "now":  # el local sale con 4 suplentes; el visitante, con su once habitual
+                subs = [[f"Hs{i}", f"suplente {i}"] for i in range(4)]
+                out[e] = {"home": regular["H"][:7] + subs, "away": regular["A"]}
+            else:
+                ev = next(x for x in events if x["id"] == e)
+                out[e] = {s: regular.get(ev[s]["id"], [[f"o{i}", "otro"] for i in range(11)]) for s in ("home", "away")}
+        return out
+
+    monkeypatch.setattr(lineups.espn_source, "fetch_year",
+                        lambda session, slug, year, cur: (events if year == 2026 else [], None))
+    monkeypatch.setattr(lineups.espn_source, "fetch_lineups", fake_lineups)
+    info = lineups.match_lineups("eng.1", "now", "H", "A", kickoff)
+    assert info.home.n_previous == lineups.N_PREVIOUS and info.away.rotation == 0.0
+    assert info.home.rotation == pytest.approx(4 / 11) and len(info.home.missing) == 4
+    assert info.shift > 0  # el local rota: el 1X2 se mueve hacia el visitante
+
+
+def test_fixture_lineups_only_for_leagues_near_kickoff(monkeypatch):
+    from src import lineups
+    calls = []
+    monkeypatch.setattr(lineups, "match_lineups", lambda *a, **k: calls.append(a) or "xi")
+    now = pd.Timestamp("2026-10-10 12:00")
+    row = pd.Series({"datetime": now + pd.Timedelta(hours=1), "id": "espn:123", "home_id": "1", "away_id": "2"})
+    assert lineups.fixture_lineups("eng.1", False, row, now) == "xi" and calls[0][:4] == ("eng.1", "123", "1", "2")
+    assert lineups.fixture_lineups("uefa.champions", True, row, now) is None  # copas: no
+    tomorrow = row.copy()
+    tomorrow["datetime"] = now + pd.Timedelta(days=1)  # aún no hay alineaciones: ni se consultan
+    assert lineups.fixture_lineups("eng.1", False, tomorrow, now) is None
+    us_row = pd.Series({"datetime": now, "id": "us:9", "espn_id": "espn:77", "espn_home_id": "5", "espn_away_id": "6"})
+    assert lineups.espn_refs(us_row) == ("77", "5", "6")
+    assert lineups.espn_refs(pd.Series({"datetime": now, "id": "us:9"})) is None
+
+
+def test_predict_match_applies_lineup_shift(trained_league):
+    from src import lineups
+    rotated = lineups.LineupInfo(lineups.TeamLineup(["a"] * 11, 0.5, ["x"], 10),
+                                 lineups.TeamLineup(["b"] * 11, 0.0, [], 10))
+    base = mm.predict_match(trained_league, "Team0", "Team11")
+    pred = mm.predict_match(trained_league, "Team0", "Team11", lineups=rotated)
+    np.testing.assert_allclose(pred.p_before_lineups, base.p_final)
+    assert pred.p_final[0] < base.p_final[0] and pred.p_final.sum() == pytest.approx(1.0)
+    text = modelo_prediccion.report(pred, trained_league.data, detail=False)
+    assert "ALINEACIONES CONFIRMADAS" in text and "con el ajuste por alineaciones" in text
