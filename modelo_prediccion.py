@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Predicción de un partido: Poisson (Dixon-Coles) + regresión logística.
+"""Predicción de un partido: Poisson con la corrección de Dixon-Coles.
 
 Script de terminal sobre `src/match_model.py` y `src/competitions.py` (el mismo
 modelo que usa la página "Partidos del día" de la app). Usa xG real de
@@ -137,24 +137,18 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
         "de forma indirecta vía las cuotas de partidos anteriores.",
         "- Descanso: calculado solo con los partidos de las competiciones descargadas.",
         SEP,
-        "🧮 RESULTADOS DE LOS MODELOS (POISSON & LOGÍSTICO)",
+        "🧮 MODELO (POISSON CON DIXON-COLES)",
         f"- Poisson (Dixon-Coles ρ={t.rho:+.3f}) -> 1: {pct(pred.p_poisson[0])} | X: {pct(pred.p_poisson[1])} | "
         f"2: {pct(pred.p_poisson[2])}",
-        f"- Regresión Logística -> 1: {pct(pred.p_logistic[0])} | X: {pct(pred.p_logistic[1])} | "
-        f"2: {pct(pred.p_logistic[2])}",
         "- Marcadores exactos más probables: "
         + " | ".join(f"{i}-{j} ({pct(p)})" for i, j, p in pred.top_scores),
-        f"- Poisson goles -> Over 2.5: {pct(pred.over25_poisson)} | Ambos anotan: {pct(pred.btts_poisson)}",
         f"- Validación ({t.val_period}, {t.n_val} partidos no vistos; entrenamiento {t.n_train}) "
-        f"log loss 1X2 -> Poisson {t.ll_poisson:.4f} | Logística {t.ll_logistic:.4f} | "
-        f"Ensemble {t.ll_ensemble:.4f}"
-        + (f" | solo {data.name}: {t.ll_ensemble_focus:.4f} ({t.n_val_focus} partidos)"
-           if t.ll_ensemble_focus is not None else ""),
+        f"log loss 1X2 -> modelo {t.ll_model:.4f} | referencia (frecuencias) {t.ll_baseline:.4f}"
+        + (f" | solo {data.name}: {t.ll_model_focus:.4f} ({t.n_val_focus} partidos)"
+           if t.ll_model_focus is not None else ""),
         *lineup_lines(pred),
         SEP,
-        "🎯 PREDICCIÓN FINAL COMBINADA (ENSEMBLE MODEL)",
-        f"- Pesos: Poisson {t.w_poisson:.0%} | Logística {1 - t.w_poisson:.0%} (mínimo log loss de validación)"
-        + (" · con el ajuste por alineaciones" if pred.lineups is not None else ""),
+        "🎯 PREDICCIÓN FINAL" + (" (con el ajuste por alineaciones)" if pred.lineups is not None else ""),
         f"- Mercado 1X2: Local {pct(pred.p_final[0])} | Empate {pct(pred.p_final[1])} | "
         f"Visitante {pct(pred.p_final[2])}",
         f"- Línea de Goles: Over 2.5 {pct(pred.over25)} | Under 2.5 {pct(1 - pred.over25)}",
@@ -183,8 +177,7 @@ def backtest_report(result) -> str:
         SEP,
         "📊 BACKTEST CONTRA EL MERCADO (cuotas de cierre)",
         f"- Partidos: {r.n_matched} de {r.n_val} de validación ({r.period}) · cuotas: {r.odds_source}",
-        f"- Log loss 1X2 -> Modelo {r.ll_model:.4f} (Poisson {r.ll_poisson:.4f}, Logística {r.ll_logistic:.4f}) | "
-        f"Mercado {r.ll_market:.4f} | Frecuencias {r.ll_baseline:.4f}",
+        f"- Log loss 1X2 -> Modelo {r.ll_model:.4f} | Mercado {r.ll_market:.4f} | Frecuencias {r.ll_baseline:.4f}",
         f"- Distancia al mercado: {r.gap:+.4f} (negativo = el modelo es mejor que el cierre)",
         f"- Mezcla modelo + mercado: peso del modelo {r.alpha:.0%} → log loss {r.ll_blend_cv:.4f} "
         "(validación cruzada; si el peso es ~0, el modelo no añade información al mercado)",
@@ -198,7 +191,7 @@ def backtest_report(result) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Predicción Poisson + regresión logística (xG / tiros / goles).")
+    parser = argparse.ArgumentParser(description="Predicción con Poisson y Dixon-Coles (xG / tiros / goles).")
     parser.add_argument("local", nargs="?", help="Equipo local (p. ej. 'Arsenal')")
     parser.add_argument("visitante", nargs="?", help="Equipo visitante (p. ej. 'Leeds')")
     parser.add_argument("--liga", default="Premier League", help="Liga o copa (Premier League, Liga MX, Champions...)")

@@ -252,12 +252,12 @@ def test_predict_match_end_to_end(trained_league):
     t = trained_league.trained
     assert t.shrink in mm.SHRINK_GRID and t.signal_weight in mm.SIGNAL_WEIGHT_GRID
     assert mm.RHO_BOUNDS[0] <= t.rho <= mm.RHO_BOUNDS[1]
-    assert t.ll_ensemble < t.ll_baseline  # la liga sintética tiene señal real
+    assert t.ll_model < t.ll_baseline  # la liga sintética tiene señal real
 
     pred = mm.predict_match(trained_league, "team0", "Team11")
-    for probs in (pred.p_poisson, pred.p_logistic, pred.p_final):
-        assert probs.sum() == pytest.approx(1.0)
-    np.testing.assert_allclose(pred.p_final, t.w_poisson * pred.p_poisson + (1 - t.w_poisson) * pred.p_logistic)
+    assert pred.p_final.sum() == pytest.approx(1.0)
+    np.testing.assert_allclose(pred.p_final, pred.p_poisson)  # sin alineaciones, el 1X2 final es el de Poisson
+    assert pred.over25 == pytest.approx(pred.over25_poisson) and pred.p_before_lineups is None
     assert pred.p_final[0] > pred.p_final[2]  # Team0 es el más fuerte de la liga sintética
     assert pred.lam_home > pred.lam_away
     assert pred.final_score is None and pred.market is None and not pred.low_data
@@ -297,9 +297,10 @@ def test_cli_report_has_required_sections(trained_league):
     pending[["odds_h", "odds_d", "odds_a", "odds_over25", "odds_under25"]] = [2.1, 3.3, 3.6, 1.9, 1.9]
     pred = mm.predict_match(trained_league, pending["home"], pending["away"], fixture=pending)
     text = modelo_prediccion.report(pred, trained_league.data, detail=True)
-    for header in ("FUENTES DE DATOS", "RESULTADOS DE LOS MODELOS", "PREDICCIÓN FINAL COMBINADA",
-                   "Poisson (Dixon-Coles", "Regresión Logística -> 1:", "Over 2.5", "Ambos Anotan", "MERCADO"):
+    for header in ("FUENTES DE DATOS", "MODELO (POISSON CON DIXON-COLES)", "PREDICCIÓN FINAL",
+                   "Poisson (Dixon-Coles", "Over 2.5", "Ambos Anotan", "MERCADO"):
         assert header in text
+    assert "Logística" not in text
 
 
 # --------------------------------------------------------------------------
@@ -455,7 +456,7 @@ def test_match_predictions_uses_date_score_and_names():
 def test_backtest_run_with_synthetic_odds(trained_league, monkeypatch):
     from src import backtest
     preds = trained_league.trained.val_predictions
-    p = preds[[f"p_ensemble_{c}" for c in mm.CLASSES]].to_numpy()
+    p = preds[[f"p_model_{c}" for c in mm.CLASSES]].to_numpy()
     odds = 1 / (p * 1.05)  # mercado "justo" igual al modelo con un 5% de margen
     fake = pd.DataFrame({"date": preds["datetime"].dt.normalize(), "home": preds["home"], "away": preds["away"],
                          "hg": preds["hg"], "ag": preds["ag"], "odds_h": odds[:, 0], "odds_d": odds[:, 1],
@@ -579,7 +580,7 @@ def test_espn_past_odds_parsing_and_cache(tmp_path, monkeypatch):
 def test_backtest_uses_espn_odds_where_football_data_has_none(trained_league, monkeypatch):
     from src import backtest
     preds = trained_league.trained.val_predictions
-    p = preds[[f"p_ensemble_{c}" for c in mm.CLASSES]].to_numpy()
+    p = preds[[f"p_model_{c}" for c in mm.CLASSES]].to_numpy()
     odds = {str(i).removeprefix("espn:"): {"home": 1 / (r[0] * 1.05), "draw": 1 / (r[1] * 1.05),
                                            "away": 1 / (r[2] * 1.05), "line": 2.5, "over": 1.9, "under": 1.9}
             for i, r in zip("espn:" + preds["id"].astype(str), p)}

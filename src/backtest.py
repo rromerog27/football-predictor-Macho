@@ -1,7 +1,7 @@
 """Backtest contra el mercado: predicciones fuera de muestra vs. cuotas de cierre.
 
-Toma las predicciones del periodo de validación de un modelo entrenado (que la
-regresión logística no vio al entrenar), las cruza por fecha, marcador y
+Toma las predicciones del periodo de validación de un modelo entrenado (partidos
+que el modelo no usó para ajustarse), las cruza por fecha, marcador y
 nombres con los partidos de football-data.co.uk (o, en las competiciones que
 no cubre, toma las cuotas previas que ESPN guarda en la ficha de cada partido
 desde finales de 2025) y compara:
@@ -43,8 +43,6 @@ class BacktestResult:
     odds_source: str
     ll_baseline: float
     ll_model: float
-    ll_poisson: float
-    ll_logistic: float
     ll_market: float
     alpha: float  # peso del modelo en la mezcla modelo + mercado (con todos los partidos)
     ll_blend_cv: float  # log loss de la mezcla con el peso elegido en la otra mitad
@@ -151,8 +149,7 @@ def run(model: LeagueModel) -> BacktestResult:
         raise PredictionError(f"Solo {len(matched)} partidos de {data.name} cruzados con cuotas: muy pocos.")
 
     y = matched["result"].to_numpy()
-    cols = {k: [f"p_{k}_{c}" for c in CLASSES] for k in ("ensemble", "poisson", "logistic")}
-    p_model = matched[cols["ensemble"]].to_numpy()
+    p_model = matched[[f"p_model_{c}" for c in CLASSES]].to_numpy()
     p_market = market_probs(matched[["odds_h", "odds_d", "odds_a"]].to_numpy(float))
     freq = np.array([np.mean(y == c) for c in CLASSES])  # referencia: frecuencias del propio periodo
     alpha, ll_blend = _blend_cv(y, p_model, p_market)
@@ -174,8 +171,6 @@ def run(model: LeagueModel) -> BacktestResult:
         odds_source=sources.index[0] if len(sources) else "",
         ll_baseline=multiclass_log_loss(y, np.tile(freq, (len(y), 1))),
         ll_model=multiclass_log_loss(y, p_model),
-        ll_poisson=multiclass_log_loss(y, matched[cols["poisson"]].to_numpy()),
-        ll_logistic=multiclass_log_loss(y, matched[cols["logistic"]].to_numpy()),
         ll_market=multiclass_log_loss(y, p_market),
         alpha=alpha,
         ll_blend_cv=ll_blend,
