@@ -23,8 +23,9 @@ entrenamiento).
 
 Con esas fuerzas, Poisson con la corrección de Dixon-Coles (ρ por máxima
 verosimilitud) da la matriz de marcadores → 1X2, Over/Under 2.5 y ambos
-anotan. Cuando hay alineaciones, `src/lineups.py` ajusta el 1X2 final. El 30%
-más reciente del histórico se reserva para validar (y para el backtest).
+anotan. Al favorito claro se le corrige la prudencia (`calibrate_favorite`) y,
+cuando hay alineaciones, `src/lineups.py` ajusta el 1X2 final. El 30% más
+reciente del histórico se reserva para validar (y para el backtest).
 """
 
 from __future__ import annotations
@@ -69,6 +70,12 @@ MARKET_LEARN_COVERAGE = 0.6  # partidos con cuotas desde el inicio del entrenami
 MARKET_RECENT_COVERAGE = 0.5  # partidos con cuotas en los últimos 12 meses
 MARKET_WEIGHT_DEFAULT = 0.7
 RHO_BOUNDS = (-0.2, 0.2)
+# Favorito claro: Poisson es prudente de más con él (cuando decía 74%, ganaba el 80%). Por encima de
+# FAVORITE_THRESHOLD su probabilidad se estira en log-odds, logit(p') = logit(p) + FAVORITE_STRETCH ·
+# (logit(p) − logit(umbral)), y el resto se reparte en proporción. Elegidos con validación "una liga
+# afuera" sobre 8.846 partidos con cuotas de 29 competiciones (ver README).
+FAVORITE_THRESHOLD = 0.55
+FAVORITE_STRETCH = 0.5
 # Peso del total de goles propio del partido frente a la media de la competición (1 = sin acercar).
 TOTAL_SHRINK_GRID = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3)
 VAL_FRACTION = 0.3
@@ -481,6 +488,20 @@ def reweight_matrix(matrix: np.ndarray, target: np.ndarray) -> np.ndarray:
     return matrix * factor
 
 
+def calibrate_favorite(p: np.ndarray) -> np.ndarray:
+    """1X2 (o filas de 1X2) con el favorito claro estirado (ver FAVORITE_THRESHOLD); sin cambios si
+    ningún resultado pasa del umbral."""
+    p = np.asarray(p, dtype=float)
+    q = np.atleast_2d(p).copy()
+    rows, fav = np.arange(len(q)), q.argmax(axis=1)
+    pf = np.clip(q[rows, fav], 1e-9, 1 - 1e-9)
+    z, z0 = np.log(pf / (1 - pf)), np.log(FAVORITE_THRESHOLD / (1 - FAVORITE_THRESHOLD))
+    pf_new = 1 / (1 + np.exp(-(z + FAVORITE_STRETCH * np.maximum(0.0, z - z0))))
+    q *= ((1 - pf_new) / (1 - pf))[:, None]
+    q[rows, fav] = pf_new
+    return q if p.ndim > 1 else q[0]
+
+
 def shift_home_away(p: np.ndarray, shift: float) -> np.ndarray:
     """1X2 con el log-odds local/visitante desplazado `shift` a favor del visitante (el empate se
     reparte solo al renormalizar)."""
@@ -739,12 +760,13 @@ def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None 
     eval_val = in_focus[val_mask] if use_focus else np.ones(val_mask.sum(), bool)
     eval_train = in_focus[train_mask] if use_focus else np.ones(train_mask.sum(), bool)
     matrices = [score_matrix(lh, la, rho) for lh, la in zip(lam_h[val_mask], lam_a[val_mask])]
-    p_val = np.array([outcome_probs(m) for m in matrices])
+    p_poisson_val = np.array([outcome_probs(m) for m in matrices])
+    p_val = calibrate_favorite(p_poisson_val)
     y_val = y[val_mask][eval_val]
 
     # Predicciones fuera de muestra de todo el periodo de validación (para el backtest contra el mercado).
     val = hist[val_mask].reset_index(drop=True)
-    over = [goal_markets(m)[0] for m in matrices]
+    over = [goal_markets(reweight_matrix(m, p))[0] for m, p in zip(matrices, p_val)]
     val_predictions = pd.DataFrame({
         "id": val["id"] if "id" in val else None, "datetime": val["datetime"], "competition": val["competition"],
         "home": val["home"], "away": val["away"],
@@ -752,6 +774,7 @@ def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None 
         "lam_h": lam_h[val_mask], "lam_a": lam_a[val_mask], "over25": over,
         "newcomer": (new_h | new_a)[val_mask], "low_data": low[val_mask],
         **{f"p_model_{c}": p_val[:, i] for i, c in enumerate(CLASSES)},
+        **{f"p_poisson_{c}": p_poisson_val[:, i] for i, c in enumerate(CLASSES)},
     })
 
     focus_metrics = {}
@@ -888,12 +911,13 @@ class MatchPrediction:
     lam_home: float
     lam_away: float
     p_poisson: np.ndarray  # [local, empate, visitante] (Poisson con Dixon-Coles)
-    p_final: np.ndarray  # el de Poisson, o ajustado por las alineaciones si se publicaron
+    p_model: np.ndarray  # el de Poisson con el favorito claro calibrado
+    p_final: np.ndarray  # el del modelo, o ajustado por las alineaciones si se publicaron
     over25: float
     btts: float
-    over25_poisson: float  # sin el ajuste por alineaciones
+    over25_poisson: float  # de la matriz de Poisson, sin calibrar ni ajustar
     btts_poisson: float
-    top_scores: list[tuple[int, int, float]]  # de la matriz de Poisson
+    top_scores: list[tuple[int, int, float]]  # de la matriz final (reescalada al 1X2 final)
     market: dict | None  # probabilidades del mercado (sin margen) si hay cuotas
     home_snap: dict = field(repr=False)
     away_snap: dict = field(repr=False)
@@ -904,7 +928,7 @@ class MatchPrediction:
     base_home: float = float("nan")  # goles medios esperados del local de la competición (con su calibración)
     base_away: float = float("nan")
     lineups: object | None = field(default=None, repr=False)  # src.lineups.LineupInfo si se aplicaron
-    p_before_lineups: np.ndarray | None = None  # 1X2 antes del ajuste por alineaciones (= p_poisson)
+    p_before_lineups: np.ndarray | None = None  # 1X2 antes del ajuste por alineaciones (= p_model)
 
     @property
     def signal_short(self) -> str:
@@ -974,11 +998,12 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
     base_h, base_a = base_goals(ratings["gls"].goals_home, ratings["gls"].goals_away, neutral)
     matrix = score_matrix(lam_h, lam_a, t.rho)
     p_poisson = outcome_probs(matrix)
-    p_final = p_poisson
-    p_before_lineups = None
+    p_model = calibrate_favorite(p_poisson)
+    p_final, p_before_lineups = p_model, None
     if lineups is not None:
-        p_before_lineups, p_final = p_final, shift_home_away(p_final, lineups.shift)
-    over25, btts = goal_markets(reweight_matrix(matrix, p_final))
+        p_before_lineups, p_final = p_model, shift_home_away(p_model, lineups.shift)
+    final_matrix = reweight_matrix(matrix, p_final)
+    over25, btts = goal_markets(final_matrix)
     over25_poisson, btts_poisson = goal_markets(matrix)
 
     final_score = None
@@ -996,12 +1021,13 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
         lam_home=lam_h,
         lam_away=lam_a,
         p_poisson=p_poisson,
+        p_model=p_model,
         p_final=p_final,
         over25=over25,
         btts=btts,
         over25_poisson=over25_poisson,
         btts_poisson=btts_poisson,
-        top_scores=top_scores(matrix),
+        top_scores=top_scores(final_matrix),
         market=market_probs(fixture),
         home_snap=h,
         away_snap=a,

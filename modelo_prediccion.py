@@ -140,6 +140,8 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
         "🧮 MODELO (POISSON CON DIXON-COLES)",
         f"- Poisson (Dixon-Coles ρ={t.rho:+.3f}) -> 1: {pct(pred.p_poisson[0])} | X: {pct(pred.p_poisson[1])} | "
         f"2: {pct(pred.p_poisson[2])}",
+        *([f"- Favorito claro calibrado -> 1: {pct(pred.p_model[0])} | X: {pct(pred.p_model[1])} | "
+           f"2: {pct(pred.p_model[2])}"] if abs(pred.p_model - pred.p_poisson).max() >= 0.005 else []),
         "- Marcadores exactos más probables: "
         + " | ".join(f"{i}-{j} ({pct(p)})" for i, j, p in pred.top_scores),
         f"- Validación ({t.val_period}, {t.n_val} partidos no vistos; entrenamiento {t.n_train}) "

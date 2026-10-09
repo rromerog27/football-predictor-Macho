@@ -485,7 +485,21 @@ diría su fuerza en la división inferior.
    la corrección de Dixon-Coles para los marcadores bajos (ρ por máxima
    verosimilitud). De la matriz de marcadores salen el 1X2, el Over/Under
    2.5, ambos anotan y los marcadores más probables.
-6. *Alineaciones* (`src/lineups.py`): cuando ESPN publica los titulares
+6. *Favorito claro:* Poisson es prudente de más con los favoritos fuertes
+   (cuando decía 64%, ganaban el 70%; con 74%, el 80%; con 83%, el 90%).
+   Si un resultado pasa del 55%, su probabilidad se estira en log-odds,
+   `logit(p') = logit(p) + 0.5 · (logit(p) − logit(0.55))`, y los otros dos
+   se reparten el resto en la misma proporción; por debajo del 55% no cambia
+   nada. Umbral y estiramiento se eligieron con validación "una liga afuera"
+   (se ajustan con las demás competiciones y se miden en la que queda
+   afuera) sobre 8.846 partidos con cuotas de 29 competiciones: 0.55 / 0.5
+   salió en 27 de las 29. Resultado: −0.0011 ± 0.0005 de log loss en total;
+   −0.0073 ± 0.0024 en los partidos con un favorito claro del mercado (≥60%,
+   1 de cada 5) y −0.030 con favoritos de 75% o más; +0.0004 en los
+   parejos. Mejora 18 de las 29 competiciones y el Over/Under (0.6791 →
+   0.6788). Con favoritos de 60-70%, 70-80% y 80% o más el modelo ahora dice
+   68%, 81% y 91%; ganaron el 70%, el 80% y el 90%.
+7. *Alineaciones* (`src/lineups.py`): cuando ESPN publica los titulares
    (~1 h antes), la rotación de cada equipo es la suma de titularidades
    (en sus 10 partidos anteriores de la competición) de sus 11 habituales
    que no salen de titulares, dividida por la de esos 11. El 1X2 final se
@@ -517,8 +531,9 @@ se valida con todos, como se usa el modelo.
 
 **Validación** (log loss 1X2 en el 30% más reciente; la referencia es
 predecir siempre las frecuencias de 1/X/2 del entrenamiento): las 33
-competiciones mejoran la referencia, de +0.016 (Uruguay, solo goles) a
-+0.164 (Primeira Liga). Nada del modelo se elige mirando esos partidos. La sección "Rendimiento del modelo" de la página
+competiciones mejoran la referencia, de +0.013 (Uruguay, solo goles) a
++0.171 (Primeira Liga). Lo único elegido con esos partidos son las dos
+constantes del favorito claro, y siempre dejando afuera la liga que se mide. La sección "Rendimiento del modelo" de la página
 muestra la validación y el backtest de cada competición.
 
 **Backtest contra el mercado** (`src/backtest.py`, `src/football_data_source.py`).
@@ -535,13 +550,15 @@ Resultado en 7.325 partidos de las 21 competiciones:
 
 | | Modelo | Cierre del mercado |
 |---|---|---|
-| Log loss 1X2 | **1.0084** | 0.9944 |
-| Log loss Over/Under 2.5 (5.331 partidos) | 0.6791 | 0.6730 |
+| Log loss 1X2 | **1.0073** | 0.9944 |
+| Log loss Over/Under 2.5 (5.331 partidos) | 0.6788 | 0.6730 |
 
-- Distancia al cierre: +0.014. Ejemplos: Premier League 1.034 vs 1.018,
-  LaLiga 0.967 vs 0.954, Bundesliga 0.968 vs 0.960, Primeira Liga 0.920
-  vs 0.904. LaLiga 2 (−0.0005) y la liga rusa (−0.021) quedan a la par o
-  por delante del cierre.
+- Distancia al cierre: +0.013 (+0.014 antes de calibrar al favorito
+  claro). Ejemplos: Premier League 1.036 vs 1.018, LaLiga 0.961 vs 0.954,
+  Bundesliga 0.966 vs 0.960, Primeira Liga 0.912 vs 0.904. LaLiga 2
+  (+0.0001) y la liga rusa (−0.026) quedan a la par o por delante del
+  cierre. En aciertos (el resultado más probable), 50% del modelo contra 51%
+  del mercado.
 - Las cifras anteriores de este README (1.0145 → 1.0072 al sumar la señal
   de mercado) se midieron con el ensemble Poisson/logística, cuyo peso se
   elegía con estos mismos partidos; con esa ventaja quitada, el modelo de
@@ -549,9 +566,9 @@ Resultado en 7.325 partidos de las 21 competiciones:
   que más, Serie A −0.016, LaLiga 2 −0.017, Primeira Liga −0.014, LaLiga
   −0.013 y Süper Lig −0.011); esas comparaciones siguen valiendo porque
   ambos lados se midieron igual.
-- Con cuotas de ESPN: Colombia +0.012, Chile −0.008 (mejor que el mercado),
-  Perú +0.037, Ecuador +0.025, Uruguay +0.019, Paraguay +0.024,
-  Libertadores +0.080 y Sudamericana +0.054 (52 y 63 partidos). En esas
+- Con cuotas de ESPN: Colombia +0.012, Chile −0.007 (mejor que el mercado),
+  Perú +0.035, Ecuador +0.024, Uruguay +0.022, Paraguay +0.023,
+  Libertadores +0.073 y Sudamericana +0.049 (52 y 63 partidos). En esas
   competiciones la señal de mercado mejoró la validación de −0.001
   (Colombia, Paraguay) a −0.027 (Sudamericana). En las copas UEFA, con
   menos de 30 partidos con cuotas por copa, no hay backtest.

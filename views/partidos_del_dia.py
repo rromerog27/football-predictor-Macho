@@ -490,7 +490,8 @@ def _detail_html(pred: mm.MatchPrediction) -> str:
     url = comps.match_url(pred.match_id)
     link = f"<a href='{url}' target='_blank' rel='noopener'>Ver partido ↗</a>" if url else ""
     lineup_row = row("Con alineaciones", pred.p_final) if pred.lineups is not None else ""
-    over_before = f" (sin alineaciones {pred.over25_poisson * 100:.1f}%)" if pred.lineups is not None else ""
+    calibrated = max(abs(pred.p_model - pred.p_poisson)) >= 0.005
+    poisson_row = row("Poisson sin calibrar", pred.p_poisson) if calibrated else ""
     lineup_note = ""
     if pred.lineups is not None:
         parts = [f"{_esc(name)}: {_esc(', '.join(team.missing)) if team.missing else _rotation_text(team)}"
@@ -499,11 +500,11 @@ def _detail_html(pred: mm.MatchPrediction) -> str:
     return (
         "<div class='pd-detail'>"
         "<table><tr><th>Modelo</th><th>1</th><th>X</th><th>2</th></tr>"
-        f"{row('Poisson (Dixon-Coles)', pred.p_poisson)}{lineup_row}{market_row}</table>"
+        f"{row('Modelo', pred.p_model)}{poisson_row}{lineup_row}{market_row}</table>"
         f"{team_block(pred.home, h, att_h, def_h, 'en casa')}"
         f"{team_block(pred.away, a, att_a, def_a, 'fuera')}"
         f"{lineup_note}<div><b>Marcadores más probables:</b> {scores}</div>"
-        f"<div><b>Over 2.5:</b> modelo {pred.over25 * 100:.1f}%{over_before}"
+        f"<div><b>Over 2.5:</b> modelo {pred.over25 * 100:.1f}%"
         f"{over_market} · <b>Ambos anotan:</b> {pred.btts * 100:.1f}%</div>"
         f"<div style='margin-top:6px'>{link}</div>"
         "</div>"
@@ -888,7 +889,9 @@ def section_today(tz: str) -> None:
             "de equipos de países distintos sea comparable.\n"
             "- **Poisson (Dixon-Coles):** fuerza de ataque/defensa ajustada por rival (12 meses ponderados por "
             "antigüedad, mezcla de señal y goles con pesos elegidos con datos) → goles esperados λ, con el total "
-            "acercado a la media de la competición → matriz de marcadores con la corrección de Dixon-Coles.\n"
+            "acercado a la media de la competición → matriz de marcadores con la corrección de Dixon-Coles. "
+            "Con un favorito claro (más del 55%), su probabilidad se estira: Poisson es prudente de más con "
+            "ellos (cuando decía 74%, ganaban el 80%).\n"
             "- **Señal de mercado:** donde hay cuotas de cierre de partidos anteriores (football-data.co.uk en "
             "21 ligas y sus divisiones inferiores; ESPN, desde finales de 2025, en copas y ligas sudamericanas), "
             "se despejan los goles esperados que implican y entran como tercera señal de fuerza: recogen lo que "
