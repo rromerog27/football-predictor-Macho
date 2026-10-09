@@ -38,6 +38,8 @@ st.set_page_config(
     initial_sidebar_state="auto",  # abierta en escritorio, cerrada en móvil
 )
 st.markdown(ui_theme.inject_global_css(), unsafe_allow_html=True)
+with st.container(key="fc_theme"):  # botón de modo claro/oscuro, fijo arriba a la derecha
+    st.html(ui_theme.theme_toggle_html(), unsafe_allow_javascript=True)
 
 pages = {
     "Fútbol real": [

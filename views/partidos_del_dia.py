@@ -58,7 +58,10 @@ PAGE_CSS = """
    validador de paleta (CVD ΔE ≥ 24, contraste ≥ 3:1) en claro (#2a78d6/#eb6834 sobre blanco) y en oscuro
    (#3b82e8/#e8693a sobre la superficie oscura); el gris es el punto medio de cada modo. */
 :root { --pd-home: #2a78d6; --pd-draw: #CBD5E1; --pd-away: #eb6834; }
-@media (prefers-color-scheme: dark) { :root { --pd-home: #3b82e8; --pd-draw: #475569; --pd-away: #e8693a; } }
+:root[data-fc-theme="dark"] { --pd-home: #3b82e8; --pd-draw: #475569; --pd-away: #e8693a; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-fc-theme]) { --pd-home: #3b82e8; --pd-draw: #475569; --pd-away: #e8693a; }
+}
 
 /* -- Cabecera compacta -- */
 .pd-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px;

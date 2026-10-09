@@ -381,9 +381,12 @@ internacionales y Japón). Tiene dos secciones:
 Cada competición se entrena una vez y queda en caché 3 horas (unos segundos
 por competición la primera vez); predecir cada partido es instantáneo. Las horas
 y el "día" usan la zona horaria del navegador (se puede cambiar en la barra
-lateral). Toda la app sigue el modo claro u oscuro del sistema
-(`.streamlit/config.toml` define los dos temas y `src/ui_theme.py`, los
-colores de los componentes propios en cada modo).
+lateral). Toda la app arranca en el modo claro u oscuro del sistema, y el
+botón de luna/sol de arriba a la derecha (en todas las páginas, también en el
+celular) cambia de modo: la elección queda guardada en ese navegador y se
+aplica al volver a entrar. `.streamlit/config.toml` define los dos temas y
+`src/ui_theme.py` el botón y los colores de los componentes propios, que
+siguen al tema activo.
 
 Desde la terminal:
 
