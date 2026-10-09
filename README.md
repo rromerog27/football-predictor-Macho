@@ -187,6 +187,8 @@ football_predictor/
 │   ├── market_signal.py        # Goles esperados implícitos en las cuotas de cierre de partidos anteriores
 │   ├── lineups.py              # Alineaciones de ESPN: rotación de cada equipo y ajuste del 1X2
 │   ├── backtest.py             # Backtest de las predicciones de validación contra las cuotas de cierre
+│   ├── performance.py          # Aciertos, calibración, historial y regla de los picks (pestañas Picks y Rendimiento)
+│   ├── ui_theme.py             # Botón de modo claro/oscuro y colores de los componentes propios
 │   ├── visualizations.py       # Construcción de gráficos Plotly
 │   └── utils.py                 # Utilidades comunes (safe_divide, logging, formateo)
 │
@@ -197,6 +199,7 @@ football_predictor/
     ├── test_reports.py         # Pruebas de exportación (CSV/Excel/HTML)
     ├── test_market_odds.py     # Pruebas de probabilidad implícita y simulación de apuestas de valor
     ├── test_fc27.py            # Pruebas de la sección FC 27 Mercado (lectura, historial, señales)
+    ├── test_performance.py     # Pruebas de aciertos, calibración, historial y regla de los picks
     └── test_modelo_prediccion.py # Pruebas sin red del modelo, sus fuentes (Understat, ESPN) y el script
 ```
 
@@ -215,13 +218,14 @@ football_predictor/
 | `src/prediction_model.py` | Entrena y calibra la regresión logística de respaldo, calcula sus métricas de validación, y combina sus probabilidades con las de Poisson ponderando por desempeño de validación (log loss). |
 | `src/report_generator.py` | Exporta a CSV/Excel/HTML lo que ya calcularon los demás módulos: tabla de estadísticas, predicción de un partido, comparación de equipos, matriz de marcadores y el reporte HTML completo. |
 | `src/market_odds.py` | Convierte cuotas 1X2 a probabilidad implícita (quitando el margen de la casa), evalúa qué tan bien predice el mercado los partidos de prueba, y simula en retrospectiva una estrategia de apuestas de valor comparando el modelo contra el mercado. |
-| `views/partidos_del_dia.py` | Página Partidos del día: lista los partidos de la fecha (en la zona horaria del navegador) con la predicción y el mercado de cada uno, y la sección "Analizar un partido". Solo presenta: el modelo vive en `src/match_model.py`. |
+| `views/partidos_del_dia.py` | Página Partidos del día, con cuatro pestañas: los partidos de la fecha (en la zona horaria del navegador) con la predicción y el mercado de cada uno, los picks del día, "Analizar" un partido y el rendimiento del modelo. Solo presenta: el modelo vive en `src/match_model.py` y las cuentas de picks y rendimiento en `src/performance.py`. |
 | `src/match_model.py` | Modelo independiente de la fuente: fuerza ajustada por rival (señal y goles), Poisson con Dixon-Coles, validación y predicción de un partido (con las probabilidades del mercado si hay cuotas). |
 | `src/competitions.py` | Registro de las 33 ligas y copas (fuente, región, pool de ligas de las copas), carga de sus datos, partidos del día y cruce de cuotas de ESPN con los partidos de Understat. |
 | `src/understat_source.py` | Descarga y caché del xG de Understat, convertido a las columnas estándar del modelo. |
 | `src/football_data_source.py` | Descarga y caché de football-data.co.uk: resultados con cuotas de cierre (Pinnacle o media del mercado, 1X2 y Over/Under), descartando cuotas corruptas. |
 | `src/market_signal.py` | Despeja los goles esperados que implican las cuotas de cierre de cada partido jugado (football-data.co.uk o ESPN), empareja nombres por resultados y los añade como señal de mercado. |
 | `src/lineups.py` | Lee los titulares de ESPN (~1 h antes del partido), mide cuánto rota cada equipo respecto a sus 10 partidos anteriores y ajusta el 1X2 final. |
+| `src/performance.py` | Funciones puras sobre las predicciones de validación y el backtest: aciertos del modelo y del mercado, favoritos claros, calibración por tramos, historial y la regla de los picks (y de los partidos a evitar). |
 | `src/backtest.py` | Cruza las predicciones de validación con las cuotas de cierre (football-data.co.uk o ESPN) y compara log loss, mezcla modelo + mercado, Over/Under y ROI simulado. |
 | `src/espn_source.py` | Descarga y caché del marcador de ESPN (resultados, tiros, calendario, campo neutral, cuotas de DraftKings) y cálculo del xG aproximado con tiros. |
 | `src/visualizations.py` | Construye los gráficos Plotly (barras, radar, evolución de forma, mapas de calor, importancia de variables) a partir de datos ya calculados. |
@@ -353,9 +357,9 @@ automáticas.
 
 La página **Partidos del día** es la que se abre por defecto al ejecutar
 `streamlit run app.py`. Cubre **33 ligas y copas** (Europa, América, copas
-internacionales y Japón). Tiene dos secciones:
+internacionales y Japón). Tiene cuatro pestañas:
 
-- **Partidos del día:** un panel con la fecha (con ‹ › para cambiar de día),
+- **Partidos:** un panel con la fecha (con ‹ › para cambiar de día),
   un buscador de equipos ("man u" encuentra Manchester United) y la
   selección de ligas y copas (por defecto 15: las 5 grandes, Portugal,
   Países Bajos, Liga MX, Argentina, Brasil, MLS, Champions, Europa League,
@@ -374,9 +378,34 @@ internacionales y Japón). Tiene dos secciones:
   - En partidos ya jugados muestra el resultado y si el pronóstico acertó.
     Si no hay partidos ese día, ofrece saltar a la próxima fecha con
     partidos. `?fecha=AAAA-MM-DD` en la URL abre la página en ese día.
-- **Analizar un partido:** elige liga o copa, local y visitante y pulsa
-  "Correr modelo". Si el partido está en el calendario de los próximos 14
-  días se usan su fecha y sus cuotas; si no, los datos disponibles hasta hoy.
+- **Picks:** con la misma fecha, buscador y ligas, los partidos en los que el
+  modelo ve un favorito claro (65% o más) y no le da menos que el mercado,
+  ordenados por valor (probabilidad del modelo × cuota − 1), con la cuota y
+  lo que da el mercado. Debajo, **Para evitar**: favoritos claros del mercado
+  a los que el modelo les da 8 puntos o más menos. Un botón muestra cómo
+  salieron los picks de los últimos 30 días en las competiciones del día. En
+  el backtest la regla dio 753 picks y ganó el 74%, pero a cuota de cierre
+  quedó en empate (ROI +0.8%): son favoritos que suelen ganar, no una fuente
+  de ganancias. **No es una recomendación de apuesta.**
+- **Analizar:** elige liga o copa, local y visitante y pulsa "Correr
+  modelo". Si el partido está en el calendario de los próximos 14 días se
+  usan su fecha y sus cuotas; si no, los datos disponibles hasta hoy. Muestra
+  la tarjeta del partido con los escudos y debajo:
+  - **Cara a cara:** racha, ataque, defensa, xG, goles, puntos de los
+    últimos 5, puntos de local / visitante y días de descanso de los dos
+    equipos lado a lado, con el mejor valor en negrita.
+  - **Modelo y mercado:** las probabilidades 1X2 y los marcadores más
+    probables.
+  - **Últimos partidos** de cada equipo (fecha, local o visitante, rival,
+    resultado y xG) y **Entre ellos**, los últimos enfrentamientos.
+- **Rendimiento:** cómo le fue al modelo de cada competición con los
+  partidos que no usó para ajustarse, en lenguaje llano: cuántas veces salió
+  su resultado más probable (y el del mercado en los mismos partidos), cuántos
+  favoritos claros ganaron y cómo salieron los picks. Un gráfico compara lo
+  que decían las probabilidades con lo que pasó, con el mercado al lado y la
+  misma información en una tabla, y la lista de últimos partidos muestra el
+  pronóstico de cada uno y si acertó. El log loss, los parámetros y el ROI
+  quedan en "Detalles técnicos".
 
 Cada competición se entrena una vez y queda en caché 3 horas (unos segundos
 por competición la primera vez); predecir cada partido es instantáneo. Las horas
@@ -533,7 +562,7 @@ se valida con todos, como se usa el modelo.
 predecir siempre las frecuencias de 1/X/2 del entrenamiento): las 33
 competiciones mejoran la referencia, de +0.013 (Uruguay, solo goles) a
 +0.171 (Primeira Liga). Lo único elegido con esos partidos son las dos
-constantes del favorito claro, y siempre dejando afuera la liga que se mide. La sección "Rendimiento del modelo" de la página
+constantes del favorito claro, y siempre dejando afuera la liga que se mide. La pestaña "Rendimiento" de la página
 muestra la validación y el backtest de cada competición.
 
 **Backtest contra el mercado** (`src/backtest.py`, `src/football_data_source.py`).
