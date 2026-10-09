@@ -16,7 +16,9 @@ modelo vive en `src/match_model.py` y las fuentes en `src/competitions.py`.
 from __future__ import annotations
 
 import html
+import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -41,72 +43,159 @@ TIMEZONES = [
     "America/Santiago", "America/Argentina/Buenos_Aires", "America/New_York", "UTC",
 ]
 ORDERED_CODES = [c.code for region in comps.REGIONS for c in comps.COMPETITIONS if c.region == region]
+ESPN_LOGO = "https://a.espncdn.com/i/teamlogos/soccer/500/{}.png"  # escudo por id de equipo de ESPN
+WEEKDAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+MONTHS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
+          "noviembre", "diciembre"]
+HIGHLIGHTS = ["Más claros", "Más parejos", "Vs mercado", "XI confirmados"]
+SORTS = ["Hora", "Liga", "Más claros"]
+N_HIGHLIGHTS = 4
 
 PAGE_CSS = """
 <style>
 [data-testid="stAppViewContainer"] { background: var(--fc-bg); }
-/* Colores de la barra 1X2: escala divergente local (azul) ↔ visitante (naranja) con empate neutro.
-   Los dos polos pasan el validador de paleta (CVD ΔE 24.7, contraste ≥3:1); el gris es el punto medio. */
+/* Barra 1X2: escala divergente local (azul) ↔ visitante (naranja) con empate neutro. Validados con el
+   validador de paleta (CVD ΔE ≥ 24, contraste ≥ 3:1) en claro (#2a78d6/#eb6834 sobre blanco) y en oscuro
+   (#3b82e8/#e8693a sobre la superficie oscura); el gris es el punto medio de cada modo. */
 :root { --pd-home: #2a78d6; --pd-draw: #CBD5E1; --pd-away: #eb6834; }
+@media (prefers-color-scheme: dark) { :root { --pd-home: #3b82e8; --pd-draw: #475569; --pd-away: #e8693a; } }
 
-.pd-head { padding-bottom: 18px; margin-bottom: 18px; border-bottom: 1px solid var(--fc-border); }
-.pd-title { font-size: clamp(1.75rem, 3.2vw, 2.35rem); font-weight: 800; letter-spacing: -.03em; line-height: 1.05;
-  color: var(--fc-text); text-transform: uppercase; }
-.pd-title span { color: var(--fc-blue); }
-.pd-sub { color: var(--fc-muted); font-size: .95rem; margin-top: 6px; }
+/* -- Cabecera compacta -- */
+.pd-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px;
+  margin-bottom: 10px; }
+.pd-title { font-size: clamp(1.45rem, 2.4vw, 1.85rem); font-weight: 800; letter-spacing: -.02em; line-height: 1.1;
+  color: var(--fc-text); }
+.pd-sub { color: var(--fc-muted); font-size: .88rem; }
 .pd-label { font-size: .68rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--fc-faint); }
 .pd-note { font-size: .8rem; color: var(--fc-muted); line-height: 1.5; margin-bottom: 1rem; }
 .pd-empty { border: 1px dashed var(--fc-border-strong); border-radius: var(--fc-radius); padding: 18px 20px;
   color: var(--fc-muted); font-size: .9rem; line-height: 1.5; background: var(--fc-surface); margin-bottom: 1rem; }
+.pd-summary { font-size: .84rem; color: var(--fc-muted); margin: 2px 0 14px; }
+.pd-summary b { color: var(--fc-text); font-weight: 700; }
+.pd-section { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 18px 0 8px; }
+.pd-section h3 { font-size: 1rem; font-weight: 800; color: var(--fc-text); margin: 0; padding: 0; letter-spacing: -.01em; }
 
-.st-key-pd_grid { display: grid !important;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 16px; align-items: start; }
-[class*="st-key-pd_card_"] { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
-  box-shadow: var(--fc-shadow); padding: 14px 16px 4px; gap: 4px; }
-[class*="st-key-pd_card_"] [data-testid="stExpander"] details { border: 0; border-top: 1px solid var(--fc-border);
-  border-radius: 0; background: transparent; }
-[class*="st-key-pd_card_"] [data-testid="stExpander"] summary { padding-left: 2px; padding-right: 2px; }
-[class*="st-key-pd_card_"] [data-testid="stExpander"] summary p { font-weight: 600; color: var(--fc-blue); }
-[class*="st-key-pd_card_"] [data-testid="stExpanderDetails"] { padding: 2px 2px 12px; }
-.st-key-pd_controls, .st-key-pd_manual_form { background: var(--fc-surface); border: 1px solid var(--fc-border);
-  border-radius: var(--fc-radius); box-shadow: var(--fc-shadow); padding: 14px 16px 6px; }
+/* -- Controles: fecha (‹ ›), buscador y ligas en una fila que se reparte en el móvil -- */
+.st-key-pd_controls { gap: 8px; }
+.st-key-pd_controls [data-testid="stDateInput"] { min-width: 150px; }
 
-.pd-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
-.pd-time { font-size: .8rem; font-weight: 700; color: var(--fc-text); font-variant-numeric: tabular-nums; }
-.pd-pill { display: inline-flex; align-items: center; gap: 4px; font-size: .66rem; font-weight: 700; letter-spacing: .06em;
-  text-transform: uppercase; padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+/* -- Escudos (ESPN); si la imagen no carga, se ven las iniciales (::before de la imagen rota) -- */
+.pd-crest { width: 22px; height: 22px; flex: none; object-fit: contain; position: relative; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center; }
+.pd-crest::before { content: attr(data-i); position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; border-radius: 50%; background: var(--fc-surface-2); border: 1px solid var(--fc-border);
+  color: var(--fc-muted); font-size: .55rem; font-weight: 800; letter-spacing: -.02em; }
+span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-border); color: var(--fc-muted);
+  font-size: .55rem; font-weight: 800; }
+
+/* -- Barra 1X2: segmentos separados por 2px de superficie, extremos redondeados a 4px -- */
+.pd-bar { display: flex; gap: 2px; height: 8px; }
+.pd-bar i { display: block; height: 100%; min-width: 3px; }
+.pd-bar i:first-child { border-radius: 4px 0 0 4px; }
+.pd-bar i:last-child { border-radius: 0 4px 4px 0; }
+.pd-legend { display: flex; justify-content: space-between; gap: 6px; font-size: .78rem; color: var(--fc-muted);
+  font-variant-numeric: tabular-nums; margin-top: 6px; }
+.pd-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.pd-legend b { color: var(--fc-text); font-weight: 700; }
+.pd-sw { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+
+/* -- Píldoras -- */
+.pd-pill { display: inline-flex; align-items: center; gap: 4px; font-size: .68rem; font-weight: 700; letter-spacing: .02em;
+  padding: 3px 9px; border-radius: 999px; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
   background: var(--fc-surface-2); color: var(--fc-muted); border: 1px solid var(--fc-border); }
 .pd-pill.ok { background: var(--fc-green-soft); color: var(--fc-green-ink); border-color: color-mix(in srgb, var(--fc-green) 25%, transparent); }
 .pd-pill.miss { background: var(--fc-red-soft); color: var(--fc-red-ink); border-color: color-mix(in srgb, var(--fc-red) 25%, transparent); }
 .pd-pill.pick { background: var(--fc-blue-soft); color: var(--fc-blue-ink); border-color: color-mix(in srgb, var(--fc-blue) 25%, transparent); }
+.pd-pill.val { background: var(--fc-yellow-soft); color: var(--fc-yellow-ink);
+  border-color: color-mix(in srgb, var(--fc-yellow) 30%, transparent); }
+.pd-pill.live { background: var(--fc-red-soft); color: var(--fc-red-ink); border-color: transparent; }
 
-.pd-teams { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; }
+/* -- Destacados -- */
+.pd-hl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 6px; }
+.pd-hl-card { display: block; text-decoration: none !important; background: var(--fc-surface); border: 1px solid var(--fc-border);
+  border-radius: var(--fc-radius); box-shadow: var(--fc-shadow); padding: 12px 14px; color: var(--fc-text) !important;
+  transition: box-shadow var(--fc-ease), transform var(--fc-ease); min-width: 0; }
+.pd-hl-card:hover { box-shadow: var(--fc-shadow-hover); transform: translateY(-1px); }
+.pd-hl-top { font-size: .72rem; color: var(--fc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-hl-teams { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 10px; }
+.pd-hl-team { display: flex; align-items: center; gap: 8px; font-size: .88rem; font-weight: 700; min-width: 0; }
+.pd-hl-team span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-hl-main { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; min-width: 0; }
+.pd-hl-main b { font-size: 1.45rem; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.pd-hl-main span { font-size: .78rem; color: var(--fc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-hl-foot { font-size: .72rem; color: var(--fc-muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
+
+/* -- Tabla de partidos: cada fila se despliega con el análisis -- */
+.pd-table { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
+  box-shadow: var(--fc-shadow); overflow: hidden; }
+.pd-cols, .pd-row > summary { display: grid; align-items: center; gap: 14px;
+  grid-template-columns: 86px minmax(0, 1.5fr) minmax(170px, 1fr) 52px minmax(120px, .8fr) 18px; padding: 10px 16px; }
+.pd-cols { font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--fc-faint);
+  border-bottom: 1px solid var(--fc-border); padding-top: 9px; padding-bottom: 9px; background: var(--fc-surface-2); }
+.pd-cols .pd-c-probs { display: grid; grid-template-columns: repeat(3, 1fr); text-align: center; }
+.pd-group { padding: 8px 16px; font-size: .74rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--fc-muted); background: var(--fc-surface-2); border-bottom: 1px solid var(--fc-border); }
+.pd-row { border-bottom: 1px solid var(--fc-border); }
+.pd-row:last-child { border-bottom: 0; }
+.pd-row > summary { cursor: pointer; list-style: none; transition: background-color var(--fc-ease); }
+.pd-row > summary::-webkit-details-marker { display: none; }
+.pd-row > summary:hover { background: color-mix(in srgb, var(--fc-blue) 4%, transparent); }
+.pd-row[open] > summary { background: color-mix(in srgb, var(--fc-blue) 6%, transparent); }
+.pd-row:target > summary { box-shadow: inset 3px 0 0 var(--fc-blue); }
+.pd-r-time { font-variant-numeric: tabular-nums; line-height: 1.25; min-width: 0; }
+.pd-r-time b { display: block; font-size: .9rem; color: var(--fc-text); font-weight: 700; }
+.pd-r-time span { display: block; font-size: .66rem; color: var(--fc-faint); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.pd-r-teams { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.pd-r-team { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: .9rem; color: var(--fc-text); }
+.pd-r-team span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-r-team em { font-style: normal; font-weight: 800; margin-left: auto; font-variant-numeric: tabular-nums; }
+.pd-r-team.win span { font-weight: 700; }
+.pd-r-probs { min-width: 0; }
+.pd-r-nums { display: grid; grid-template-columns: repeat(3, 1fr); text-align: center; font-size: .86rem;
+  font-variant-numeric: tabular-nums; color: var(--fc-muted); margin-bottom: 5px; }
+.pd-r-nums b { color: var(--fc-text); font-weight: 800; }
+.pd-r-over { font-size: .86rem; font-variant-numeric: tabular-nums; color: var(--fc-text); text-align: right; }
+.pd-r-pick { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; min-width: 0; }
+.pd-r-pick .pd-pill { display: inline-block; }
+.pd-chev { color: var(--fc-faint); font-size: .8rem; transition: transform var(--fc-ease); text-align: right; }
+.pd-row[open] .pd-chev { transform: rotate(90deg); }
+.pd-r-body { padding: 4px 16px 16px; border-top: 1px dashed var(--fc-border); }
+.pd-r-body .pd-detail { max-width: 760px; }
+.pd-r-market { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: .78rem; color: var(--fc-muted);
+  margin: 10px 0 2px; font-variant-numeric: tabular-nums; }
+.pd-r-market b { color: var(--fc-text); }
+
+/* -- Tarjeta (sección "Analizar un partido") -- */
+[class*="st-key-pd_card_"] { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
+  box-shadow: var(--fc-shadow); padding: 14px 16px 4px; gap: 4px; }
+.st-key-pd_manual_form, .st-key-pd_perf_form { background: var(--fc-surface); border: 1px solid var(--fc-border);
+  border-radius: var(--fc-radius); box-shadow: var(--fc-shadow); padding: 14px 16px 6px; }
+.pd-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.pd-time { font-size: .8rem; font-weight: 700; color: var(--fc-text); font-variant-numeric: tabular-nums; }
+.pd-teams { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px;
+  margin-bottom: 12px; }
 .pd-team { min-width: 0; }
 .pd-team.away { text-align: right; }
 .pd-team-name { font-size: 1rem; font-weight: 700; color: var(--fc-text); line-height: 1.2; overflow-wrap: anywhere; }
 .pd-team-xg { font-size: .74rem; color: var(--fc-muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
 .pd-score { font-size: 1.25rem; font-weight: 800; color: var(--fc-text); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pd-vs { font-size: .72rem; font-weight: 700; color: var(--fc-faint); text-transform: uppercase; letter-spacing: .08em; }
-
-/* Barra 1X2: segmentos separados por 2px de superficie, extremos redondeados a 4px. */
-.pd-bar { display: flex; gap: 2px; height: 10px; margin: 12px 0 6px; }
-.pd-bar i { display: block; height: 100%; min-width: 3px; }
-.pd-bar i:first-child { border-radius: 4px 0 0 4px; }
-.pd-bar i:last-child { border-radius: 0 4px 4px 0; }
-.pd-legend { display: flex; justify-content: space-between; gap: 6px; font-size: .78rem; color: var(--fc-muted);
-  font-variant-numeric: tabular-nums; }
-.pd-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.pd-legend b { color: var(--fc-text); font-weight: 700; }
-.pd-sw { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
-
-.pd-markets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0 8px; }
-.pd-markets { margin-bottom: 12px; }
+.pd-markets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
 .pd-market { background: var(--fc-surface-2); border-radius: var(--fc-radius-sm); padding: 7px 9px; min-width: 0; }
 .pd-market span { display: block; font-size: .72rem; font-weight: 600; color: var(--fc-muted); white-space: nowrap; }
 .pd-market b { display: block; font-size: .98rem; color: var(--fc-text); font-variant-numeric: tabular-nums; }
+.pd-mkt { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: .76rem; color: var(--fc-muted);
+  font-variant-numeric: tabular-nums; margin: -2px 0 12px; }
+.pd-mkt b { color: var(--fc-text); font-weight: 700; }
+.pd-mkt .pd-label { margin-right: 2px; }
+.pd-mkt .pd-pill.val { margin-left: auto; }
+.pd-warn { font-size: .74rem; color: var(--fc-yellow-ink); margin: -4px 0 10px; }
+.pd-info { font-size: .74rem; color: var(--fc-muted); margin: -4px 0 10px; }
 
+/* -- Análisis (dentro de la fila o junto a la tarjeta) -- */
 .pd-detail { font-size: .82rem; color: var(--fc-muted); line-height: 1.5; }
-.pd-detail table { width: 100%; border-collapse: collapse; margin: 4px 0 10px; font-variant-numeric: tabular-nums; }
+.pd-detail table { width: 100%; border-collapse: collapse; margin: 8px 0 10px; font-variant-numeric: tabular-nums; }
 .pd-detail th { text-align: left; font-weight: 600; color: var(--fc-faint); font-size: .7rem; text-transform: uppercase;
   letter-spacing: .05em; padding: 4px 4px 4px 0; border-bottom: 1px solid var(--fc-border); }
 .pd-detail td { padding: 5px 4px 5px 0; border-bottom: 1px solid var(--fc-border); color: var(--fc-text); }
@@ -114,8 +203,7 @@ PAGE_CSS = """
 .pd-ts { padding: 6px 0 8px; border-bottom: 1px solid var(--fc-border); margin-bottom: 8px; }
 .pd-ts-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .pd-ts-head b { color: var(--fc-text); font-weight: 700; }
-.pd-ts-meta { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 4px; font-size: .78rem;
-  font-variant-numeric: tabular-nums; }
+.pd-ts-meta { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 4px; font-size: .78rem; font-variant-numeric: tabular-nums; }
 .pd-ts-meta span { white-space: nowrap; }
 .pd-form { display: inline-flex; gap: 3px; }
 .pd-form i { font-style: normal; font-size: .66rem; font-weight: 800; width: 17px; height: 17px; border-radius: 4px;
@@ -125,17 +213,22 @@ PAGE_CSS = """
 .pd-form .P { background: var(--fc-red-soft); color: var(--fc-red-ink); }
 .pd-detail a { color: var(--fc-blue); font-weight: 600; text-decoration: none; }
 
-/* Mercado: probabilidades sin margen de las cuotas y la mayor diferencia con el modelo. */
-.pd-mkt { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: .76rem; color: var(--fc-muted);
-  font-variant-numeric: tabular-nums; margin: -2px 0 12px; }
-.pd-mkt b { color: var(--fc-text); font-weight: 700; }
-.pd-mkt .pd-label { margin-right: 2px; }
-.pd-pill.val { background: var(--fc-yellow-soft); color: var(--fc-yellow-ink);
-  border-color: color-mix(in srgb, var(--fc-yellow) 30%, transparent); margin-left: auto; }
-.pd-warn { font-size: .74rem; color: var(--fc-yellow-ink); margin: -4px 0 10px; }
-.pd-info { font-size: .74rem; color: var(--fc-muted); margin: -4px 0 10px; }
-.st-key-pd_perf_form { background: var(--fc-surface); border: 1px solid var(--fc-border);
-  border-radius: var(--fc-radius); box-shadow: var(--fc-shadow); padding: 14px 16px 6px; }
+/* -- Móvil: cada fila en dos líneas (hora · equipos · pronóstico / barra · over) y destacados deslizables -- */
+@media (max-width: 760px) {
+  .pd-cols { display: none; }
+  .pd-row > summary { grid-template-columns: 48px minmax(0, 1fr) 96px; grid-template-areas:
+      "time teams pick" "probs probs over"; gap: 8px 10px; padding: 10px 12px; }
+  .pd-r-time { grid-area: time; } .pd-r-teams { grid-area: teams; } .pd-r-pick { grid-area: pick; }
+  .pd-r-probs { grid-area: probs; } .pd-r-over { grid-area: over; align-self: end; font-size: .78rem; }
+  .pd-r-over::before { content: "+2.5 "; color: var(--fc-faint); font-size: .7rem; }
+  .pd-chev { display: none; }
+  .pd-r-body { padding: 4px 12px 14px; }
+  .pd-hl { grid-auto-flow: column; grid-template-columns: none; grid-auto-columns: 78%; overflow-x: auto;
+    scroll-snap-type: x mandatory; padding-bottom: 6px; }
+  .pd-hl-card { scroll-snap-align: start; }
+  .pd-section .pd-note { display: none; }
+  .st-key-pd_query { flex: 1 1 150px !important; width: auto !important; min-width: 0; }
+}
 </style>
 """
 st.markdown(PAGE_CSS, unsafe_allow_html=True)
@@ -258,7 +351,7 @@ def _pick_pill(pred: mm.MatchPrediction) -> str:
     pick = ("1 · " + pred.home, "X · Empate", "2 · " + pred.away)[best]
     if pred.final_score is None:
         if pred.p_final[best] < 0.45:
-            return "<span class='pd-pill' title='Ningún resultado supera el 45%'>Abierto</span>"
+            return "<span class='pd-pill' title='Ningún resultado supera el 45%'>Parejo</span>"
         return f"<span class='pd-pill pick' title='Resultado más probable'>{_esc(pick)}</span>"
     hg, ag = pred.final_score
     actual = 0 if hg > ag else (1 if hg == ag else 2)
@@ -424,6 +517,199 @@ def _match_card(pred: mm.MatchPrediction, tz: str, key: str, show_date: bool = F
                 st.markdown(_detail_html(pred), unsafe_allow_html=True)
 
 
+# ---------------------------------------------------------------------------
+# Panel del día: escudos, destacados y tabla
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DayItem:
+    """Un partido del día con su predicción (o el motivo por el que no la hay)."""
+    key: str
+    code: str
+    row: pd.Series
+    pred: mm.MatchPrediction | None
+    error: str | None
+    home_id: str | None
+    away_id: str | None
+
+
+def _initials(name: str) -> str:
+    words = [w for w in re.split(r"[\s\-.()]+", str(name)) if w and w[0].isalnum()]
+    return ("".join(w[0] for w in words[:2]) or str(name)[:2]).upper()
+
+
+def _crest(team_id: str | None, name: str) -> str:
+    """Escudo de ESPN; si no hay id o la imagen no carga, las iniciales del equipo."""
+    initials = _esc(_initials(name))
+    if team_id:
+        return f"<img class='pd-crest' src='{ESPN_LOGO.format(team_id)}' alt='' data-i='{initials}' loading='lazy'>"
+    return f"<span class='pd-crest'>{initials}</span>"
+
+
+def _team_ids(row: pd.Series) -> tuple[str | None, str | None]:
+    def text(key: str) -> str | None:
+        value = row.get(key)
+        return value if isinstance(value, str) and value else None
+
+    return text("espn_home_id") or text("home_id"), text("espn_away_id") or text("away_id")
+
+
+def _bar(p) -> str:
+    names = ("Local", "Empate", "Visitante")
+    colors = ("var(--pd-home)", "var(--pd-draw)", "var(--pd-away)")
+    return ("<div class='pd-bar' role='img' aria-label='1X2: " + ", ".join(f"{n} {x * 100:.0f}%" for n, x in zip(names, p))
+            + "'>" + "".join(f"<i style='flex:{x:.4f};background:{c}' title='{n}: {x * 100:.1f}%'></i>"
+                             for n, x, c in zip(names, p, colors)) + "</div>")
+
+
+def _value_edge(pred: mm.MatchPrediction) -> tuple[int, float] | None:
+    """(resultado, puntos) donde el modelo más supera al mercado, si hay cuotas."""
+    if not pred.market:
+        return None
+    diff = pred.p_final - pred.market["p_1x2"]
+    best = int(diff.argmax())
+    return best, float(diff[best])
+
+
+def _flags_html(pred: mm.MatchPrediction) -> str:
+    out = ""
+    edge = _value_edge(pred)
+    if edge and edge[1] >= VALUE_THRESHOLD:
+        out += (f"<span class='pd-pill val' title='El modelo da {edge[1] * 100:.1f} puntos más que el mercado a este "
+                f"resultado. No es una recomendación de apuesta.'>+{edge[1] * 100:.0f} al {('1', 'X', '2')[edge[0]]}</span>")
+    if pred.lineups is not None:
+        out += "<span class='pd-pill' title='Alineaciones confirmadas: el 1X2 tiene en cuenta las rotaciones'>XI</span>"
+    return out
+
+
+def _outcome_label(pred: mm.MatchPrediction, k: int) -> str:
+    return (f"gana {pred.home}", "empate", f"gana {pred.away}")[k]
+
+
+def _status(item: DayItem, tz: str, now: pd.Timestamp) -> tuple[str, str]:
+    """(texto principal, clase) de la columna de hora: hora local, "En juego" o "Final"."""
+    kickoff = item.row["datetime"]
+    if item.pred is not None and item.pred.final_score is not None:
+        return "Final", ""
+    if kickoff <= now <= kickoff + pd.Timedelta(hours=2, minutes=15):
+        return "En juego", "live"
+    return f"{_local(kickoff, tz):%H:%M}", ""
+
+
+def _row_html(item: DayItem, tz: str, now: pd.Timestamp, show_league: bool) -> str:
+    row, pred = item.row, item.pred
+    league = comps.BY_CODE[item.code].name
+    status, cls = _status(item, tz, now)
+    main = "<span class='pd-pill live'>En juego</span>" if cls == "live" else _esc(status)
+    sub = _esc(league) if show_league else (f"{_local(row['datetime'], tz):%H:%M}" if status == "Final" else "")
+    time_html = f"<div class='pd-r-time'><b>{main}</b><span title='{_esc(league)}'>{sub}</span></div>"
+    score = pred.final_score if pred is not None else None
+    teams = []
+    for k, (name, team_id) in enumerate(((row["home"], item.home_id), (row["away"], item.away_id))):
+        goals = f"<em>{score[k]}</em>" if score else ""
+        win = " win" if score and score[k] > score[1 - k] else ""
+        teams.append(f"<div class='pd-r-team{win}'>{_crest(team_id, name)}<span>{_esc(name)}</span>{goals}</div>")
+    teams_html = f"<div class='pd-r-teams'>{''.join(teams)}</div>"
+    if pred is None:
+        return (f"<details class='pd-row' id='m-{item.key}'><summary>{time_html}{teams_html}"
+                f"<div class='pd-r-probs pd-note'>{_esc(item.error)}</div><div></div><div></div><div></div></summary>"
+                "</details>")
+    best = int(pred.p_final.argmax())
+    nums = "".join(f"<b>{x * 100:.0f}</b>" if k == best else f"<span>{x * 100:.0f}</span>"
+                   for k, x in enumerate(pred.p_final))
+    body = (f"{_market_html(pred)}{_lineup_html(pred)}{_detail_html(pred)}")
+    return (
+        f"<details class='pd-row' id='m-{item.key}'><summary>"
+        f"{time_html}{teams_html}"
+        f"<div class='pd-r-probs'><div class='pd-r-nums'>{nums}</div>{_bar(pred.p_final)}</div>"
+        f"<div class='pd-r-over' title='Probabilidad de más de 2.5 goles'>{_pct(pred.over25)}</div>"
+        f"<div class='pd-r-pick'>{_pick_pill(pred)}{_flags_html(pred)}</div>"
+        "<div class='pd-chev' aria-hidden='true'>›</div>"
+        f"</summary><div class='pd-r-body'>{body}</div></details>"
+    )
+
+
+def _table_html(items: list[DayItem], tz: str, now: pd.Timestamp, sort: str) -> str:
+    head = ("<div class='pd-cols'><span>Hora</span><span>Partido</span>"
+            "<span class='pd-c-probs'><span>1</span><span>X</span><span>2</span></span>"
+            "<span style='text-align:right'>+2.5</span><span style='text-align:right'>Pronóstico</span><span></span></div>")
+    rows = []
+    if sort == "Liga":
+        last = None
+        for it in sorted(items, key=lambda it: (ORDERED_CODES.index(it.code), it.row["datetime"])):
+            if it.code != last:
+                rows.append(f"<div class='pd-group'>{_esc(comps.BY_CODE[it.code].name)}</div>")
+                last = it.code
+            rows.append(_row_html(it, tz, now, show_league=False))
+    else:
+        if sort == "Más claros":
+            items = sorted(items, key=lambda it: -(it.pred.p_final.max() if it.pred is not None else 0))
+        rows = [_row_html(it, tz, now, show_league=True) for it in items]
+    return f"<div class='pd-table'>{head}{''.join(rows)}</div>"
+
+
+def _highlight_items(items: list[DayItem], kind: str) -> list[tuple[DayItem, str, str, str]]:
+    """Hasta N_HIGHLIGHTS partidos destacados: (partido, cifra, texto, pie)."""
+    preds = [it for it in items if it.pred is not None]
+    pending = [it for it in preds if it.pred.final_score is None] or preds
+    out = []
+    if kind == "Más claros":
+        for it in sorted(pending, key=lambda it: -it.pred.p_final.max())[:N_HIGHLIGHTS]:
+            k = int(it.pred.p_final.argmax())
+            out.append((it, _pct(it.pred.p_final[k]), _outcome_label(it.pred, k), ""))
+    elif kind == "Más parejos":
+        for it in sorted(pending, key=lambda it: it.pred.p_final.max())[:N_HIGHLIGHTS]:
+            p = it.pred.p_final
+            out.append((it, " · ".join(f"{x * 100:.0f}" for x in p), "1 · X · 2: ningún resultado pasa del "
+                        f"{p.max() * 100:.0f}%", ""))
+    elif kind == "Vs mercado":
+        edges = [(it, _value_edge(it.pred)) for it in pending if it.pred.market]
+        for it, (k, d) in sorted(edges, key=lambda x: -x[1][1])[:N_HIGHLIGHTS]:
+            pm = it.pred.market["p_1x2"][k]
+            out.append((it, f"+{d * 100:.0f}", f"pts al {('1', 'X', '2')[k]} ({_outcome_label(it.pred, k)})",
+                        f"Modelo {_pct(it.pred.p_final[k])} · mercado {_pct(pm)}"))
+    elif kind == "XI confirmados":
+        with_xi = [it for it in preds if it.pred.lineups is not None]
+        for it in sorted(with_xi, key=lambda it: -abs(it.pred.lineups.shift))[:N_HIGHLIGHTS]:
+            lu, p0, p1 = it.pred.lineups, it.pred.p_before_lineups, it.pred.p_final
+            k = int(abs(p1 - p0).argmax())
+            out.append((it, f"{(p1[k] - p0[k]) * 100:+.0f}", f"pts al {('1', 'X', '2')[k]} por las alineaciones",
+                        f"{it.pred.home}: {_rotation_text(lu.home)} · {it.pred.away}: {_rotation_text(lu.away)}"))
+    return out
+
+
+def _highlights_html(entries: list[tuple[DayItem, str, str, str]], tz: str) -> str:
+    cards = []
+    for it, main, text, foot in entries:
+        when = _local(it.row["datetime"], tz)
+        teams = "".join(f"<div class='pd-hl-team'>{_crest(tid, name)}<span>{_esc(name)}</span></div>"
+                        for name, tid in ((it.row["home"], it.home_id), (it.row["away"], it.away_id)))
+        foot_html = f"<div class='pd-hl-foot'>{_esc(foot)}</div>" if foot else ""
+        cards.append(
+            f"<a class='pd-hl-card' href='#m-{it.key}' title='Ver el partido en la tabla'>"
+            f"<div class='pd-hl-top'>{when:%H:%M} · {_esc(comps.BY_CODE[it.code].name)}</div>"
+            f"<div class='pd-hl-teams'>{teams}</div>"
+            f"<div class='pd-hl-main'><b>{_esc(main)}</b><span>{_esc(text)}</span></div>"
+            f"{_bar(it.pred.p_final)}{foot_html}</a>")
+    return f"<div class='pd-hl'>{''.join(cards)}</div>"
+
+
+def _matches_query(row: pd.Series, query: str) -> bool:
+    """Cada palabra buscada empieza alguna palabra del local o del visitante: "man u" encuentra
+    "Manchester United" y "real" no encuentra "Montréal"."""
+    tokens = mm.normalize(query).split()
+    for side in ("home", "away"):
+        words = mm.normalize(str(row[side])).split()
+        if all(any(w.startswith(t) for w in words) for t in tokens):
+            return True
+    return not tokens
+
+
+def _long_date(day: date) -> str:
+    return f"{WEEKDAYS[day.weekday()].capitalize()} {day.day} de {MONTHS[day.month - 1]}"
+
+
 def _safe_key(text: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in str(text))
 
@@ -477,23 +763,35 @@ def _jump_to(day: date) -> None:
     st.session_state["pd_date"] = day
 
 
+def _shift_day(delta: int) -> None:
+    st.session_state["pd_date"] = st.session_state["pd_date"] + timedelta(days=delta)
+
+
+def _section_title(title: str, note: str = "") -> None:
+    note_html = f"<span class='pd-note' style='margin:0'>{_esc(note)}</span>" if note else ""
+    st.markdown(f"<div class='pd-section'><h3>{_esc(title)}</h3>{note_html}</div>", unsafe_allow_html=True)
+
+
 def section_today(tz: str) -> None:
-    if "pd_date" not in st.session_state:  # el botón "próxima fecha" la cambia vía session_state
+    if "pd_date" not in st.session_state:  # los botones ‹ › y "próxima fecha" la cambian vía session_state
         st.session_state["pd_date"] = _date_from_url() or pd.Timestamp.now(tz=tz).date()
     for region in comps.REGIONS:  # selección por defecto (vía session_state, sin `default` en el widget)
         st.session_state.setdefault(f"pd_codes_{region}", [c for c in comps.DEFAULT_CODES
                                                           if comps.BY_CODE[c].region == region])
     chosen = sum(len(st.session_state[f"pd_codes_{r}"]) for r in comps.REGIONS)
-    with st.container(key="pd_controls"):
-        c1, c2 = st.columns([1, 1.6], vertical_alignment="bottom")
-        with c1:
-            day = st.date_input("Fecha", key="pd_date", format="DD/MM/YYYY")
-        with c2:
-            with st.popover(f"Ligas y copas · {chosen} elegidas", icon=":material/tune:", width="stretch"):
-                for region in comps.REGIONS:
-                    st.pills(region, [c.code for c in comps.COMPETITIONS if c.region == region],
-                             format_func=lambda c: comps.BY_CODE[c].name, selection_mode="multi",
-                             key=f"pd_codes_{region}")
+    with st.container(key="pd_controls", horizontal=True, vertical_alignment="center", gap="small", wrap=True):
+        st.button("", icon=":material/chevron_left:", key="pd_prev", on_click=_shift_day, args=(-1,),
+                  help="Día anterior")
+        day = st.date_input("Fecha", key="pd_date", format="DD/MM/YYYY", label_visibility="collapsed", width=140)
+        st.button("", icon=":material/chevron_right:", key="pd_next", on_click=_shift_day, args=(1,),
+                  help="Día siguiente")
+        query = st.text_input("Buscar equipo", key="pd_query", placeholder="Buscar equipo", icon=":material/search:",
+                              label_visibility="collapsed", width=230)
+        with st.popover(f"Ligas y copas · {chosen}", icon=":material/tune:", key="pd_leagues"):
+            for region in comps.REGIONS:
+                st.pills(region, [c.code for c in comps.COMPETITIONS if c.region == region],
+                         format_func=lambda c: comps.BY_CODE[c].name, selection_mode="multi",
+                         key=f"pd_codes_{region}")
     codes = [c for r in comps.REGIONS for c in st.session_state[f"pd_codes_{r}"]]
     if not codes:
         st.markdown("<div class='pd-empty'>Elige al menos una liga o copa.</div>", unsafe_allow_html=True)
@@ -507,19 +805,14 @@ def section_today(tz: str) -> None:
         st.warning(f"{comps.BY_CODE[code].name}: {err}")
 
     if not fixtures:
-        st.markdown(f"<div class='pd-empty'>No hay partidos el {day:%d/%m/%Y} en las competiciones elegidas.</div>",
-                    unsafe_allow_html=True)
+        st.markdown(f"<div class='pd-empty'>No hay partidos el {_long_date(day).lower()} en las competiciones "
+                    "elegidas.</div>", unsafe_allow_html=True)
         nxt = _next_kickoff(selected, end)
         if nxt is not None:
             nxt_day = _local(nxt, tz).date()
-            st.button(f"Ir a la próxima fecha con partidos: {nxt_day:%d/%m/%Y}", on_click=_jump_to,
+            st.button(f"Ir a la próxima fecha con partidos: {_long_date(nxt_day).lower()}", on_click=_jump_to,
                       args=(nxt_day,), icon=":material/event:")
         return
-
-    total = sum(len(f) for f in fixtures.values())
-    n_comp = f"{len(fixtures)} " + ("competición" if len(fixtures) == 1 else "competiciones")
-    st.markdown(f"<div class='pd-note'>{total} partido{'' if total == 1 else 's'} en {n_comp} · horas en {_esc(tz)} · "
-                "predicción con los datos anteriores a cada partido.</div>", unsafe_allow_html=True)
 
     models: dict[str, mm.LeagueModel] = {}
     progress = st.progress(0.0, text="Preparando modelos…") if len(fixtures) > 1 else None
@@ -542,21 +835,46 @@ def section_today(tz: str) -> None:
     day_matches["_order"] = day_matches["_code"].map(ORDERED_CODES.index)
     day_matches = day_matches.sort_values(["datetime", "_order", "home"])
 
-    with st.container(key="pd_grid"):
-        for fixture in day_matches.to_dict("records"):
-            row = pd.Series(fixture)
-            code = row["_code"]
-            try:
-                pred = mm.predict_match(models[code], row["home"], row["away"], fixture=row,
-                                        lineups=_row_lineups(code, row))
-            except mm.PredictionError as exc:
-                with st.container(key=f"pd_card_{_safe_key(row['id'])}"):
-                    st.markdown(f"<div class='pd-top'><span class='pd-time'>{_local(row['datetime'], tz):%H:%M}"
-                                f" · {_esc(comps.BY_CODE[code].name)}</span></div>"
-                                f"<b>{_esc(row['home'])} vs {_esc(row['away'])}</b>"
-                                f"<div class='pd-note'>{_esc(exc)}</div>", unsafe_allow_html=True)
-                continue
-            _match_card(pred, tz, key=_safe_key(row["id"]))
+    items = []
+    for fixture in day_matches.to_dict("records"):
+        row = pd.Series(fixture)
+        code = row["_code"]
+        pred, error = None, None
+        try:
+            pred = mm.predict_match(models[code], row["home"], row["away"], fixture=row,
+                                    lineups=_row_lineups(code, row))
+        except mm.PredictionError as exc:
+            error = str(exc)
+        items.append(DayItem(_safe_key(row["id"]), code, row, pred, error, *_team_ids(row)))
+    now = mm.utc_now()
+    shown = [it for it in items if _matches_query(it.row, query)]
+
+    n_leagues = len({it.code for it in items})
+    st.markdown(f"<div class='pd-summary'><b>{_long_date(day)}</b> · {len(items)} partido"
+                f"{'' if len(items) == 1 else 's'} en {n_leagues} {'liga' if n_leagues == 1 else 'ligas y copas'} · "
+                f"hora de {_esc(tz.split('/')[-1].replace('_', ' '))}</div>", unsafe_allow_html=True)
+
+    if query:
+        if not shown:
+            st.markdown(f"<div class='pd-empty'>Ningún partido de este día coincide con «{_esc(query)}».</div>",
+                        unsafe_allow_html=True)
+            return
+    else:
+        kinds = [k for k in HIGHLIGHTS
+                 if (k != "Vs mercado" or any(it.pred is not None and it.pred.market for it in items))
+                 and (k != "XI confirmados" or any(it.pred is not None and it.pred.lineups for it in items))]
+        _section_title("Destacados")
+        kind = st.segmented_control("Destacados", kinds, default=kinds[0], key="pd_hl", required=True,
+                                    label_visibility="collapsed")
+        entries = _highlight_items(items, kind or kinds[0])
+        if entries:
+            st.markdown(_highlights_html(entries, tz), unsafe_allow_html=True)
+
+    _section_title(f"Partidos ({len(shown)})" if query else "Todos los partidos",
+                   "Toca un partido para ver el análisis")
+    sort = st.segmented_control("Ordenar por", SORTS, default=SORTS[0], key="pd_sort", required=True,
+                                label_visibility="collapsed")
+    st.markdown(_table_html(shown, tz, now, sort or SORTS[0]), unsafe_allow_html=True)
 
     with st.expander("Cómo funciona y limitaciones"):
         st.markdown(
@@ -731,20 +1049,20 @@ tz_options = ([browser_tz] if browser_tz and browser_tz not in TIMEZONES else []
 default_tz = browser_tz if browser_tz else "UTC"
 
 st.markdown(
-    "<div class='pd-head'><div class='pd-title'>Partidos <span>del día</span></div>"
-    f"<div class='pd-sub'>Predicciones Poisson + regresión logística para {len(comps.COMPETITIONS)} ligas y copas: "
-    "xG real (Understat) o xG aproximado con tiros (ESPN), comparadas con el mercado.</div></div>",
+    "<div class='pd-head'><div class='pd-title'>Partidos del día</div>"
+    f"<div class='pd-sub'>Pronósticos del modelo para {len(comps.COMPETITIONS)} ligas y copas, comparados con el "
+    "mercado</div></div>",
     unsafe_allow_html=True)
 
 with st.sidebar:
     tz = st.selectbox("Zona horaria", tz_options, index=tz_options.index(default_tz), key="pd_tz",
                       help="Por defecto, la de tu navegador. Define qué partidos son \"del día\" y sus horas.")
-view = st.segmented_control("Sección", ["Partidos del día", "Analizar un partido", "Rendimiento del modelo"],
-                            default="Partidos del día", key="pd_view", label_visibility="collapsed")
+view = st.segmented_control("Sección", ["Partidos", "Analizar", "Rendimiento"], default="Partidos", key="pd_view",
+                            required=True, label_visibility="collapsed")
 
-if view == "Analizar un partido":
+if view == "Analizar":
     section_manual(tz)
-elif view == "Rendimiento del modelo":
+elif view == "Rendimiento":
     section_performance()
 else:
     section_today(tz)

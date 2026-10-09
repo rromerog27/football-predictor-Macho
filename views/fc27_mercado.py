@@ -102,7 +102,7 @@ PAGE_CSS = """
 .fc-chip { display: inline-block; font-size: .64rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
   padding: 2px 7px; border-radius: 6px; background: var(--fc-surface-2); color: var(--fc-muted); border: 1px solid var(--fc-border);
   vertical-align: 1px; }
-.fc-meter { height: 6px; border-radius: 999px; background: #EDF1F6; overflow: hidden; }
+.fc-meter { height: 6px; border-radius: 999px; background: var(--fc-border); overflow: hidden; }
 .fc-meter i { display: block; height: 100%; border-radius: 999px; background: var(--tone); }
 .fc-empty { border: 1px dashed var(--fc-border-strong); border-radius: var(--fc-radius); padding: 18px 20px; color: var(--fc-muted);
   font-size: .9rem; line-height: 1.5; background: var(--fc-surface); margin-bottom: 1rem; }
