@@ -68,6 +68,25 @@ TOKENS = {
     "shadow-hover": "0 8px 20px -6px rgba(15,23,42,.14), 0 2px 4px rgba(15,23,42,.05)",
     "ease": ".15s ease",
 }
+# Modo oscuro: los mismos roles con valores para fondo oscuro (se aplican si el sistema del usuario
+# está en oscuro; .streamlit/config.toml define el tema oscuro de los widgets con los mismos colores).
+DARK_TOKENS = {
+    **TOKENS,
+    "bg": "#0B0F17",
+    "surface": "#131A26",
+    "surface-2": "#1A2332",
+    "border": "#263142",
+    "border-strong": "#364357",
+    "text": "#E6EBF2",
+    "muted": "#A3AEBE",
+    "faint": "#6B778A",
+    "blue": "#5B8DEF", "blue-soft": "#17233D", "blue-ink": "#A9C4FA",
+    "green": "#3FBF6E", "green-soft": "#12291C", "green-ink": "#86E0A8",
+    "yellow": "#F0A43A", "yellow-soft": "#2C2112", "yellow-ink": "#F6C77A",
+    "red": "#F26B6B", "red-soft": "#2D1517", "red-ink": "#F7A3A3",
+    "shadow": "0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.25)",
+    "shadow-hover": "0 8px 20px -6px rgba(0,0,0,.55), 0 2px 4px rgba(0,0,0,.3)",
+}
 BORDER = TOKENS["border"]
 GRID = "#EEF2F7"            # líneas de cuadrícula de los gráficos
 FONT = "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif"
@@ -77,9 +96,11 @@ def inject_global_css() -> str:
     """CSS global: variables del sistema visual, chrome de Streamlit, tabs,
     botones y las clases `.fp-*` que usan los componentes de este módulo."""
     tokens = "".join(f"--fc-{name}: {value};" for name, value in TOKENS.items())
+    dark = "".join(f"--fc-{name}: {value};" for name, value in DARK_TOKENS.items() if value != TOKENS[name])
     return f"""
     <style>
     :root {{ {tokens} }}
+    @media (prefers-color-scheme: dark) {{ :root {{ {dark} color-scheme: dark; }} }}
 
     /* -- Chrome de Streamlit: fuera el menú, el botón Deploy, las acciones de la
        barra (Share, GitHub… de Streamlit Cloud) y el footer. Se mantienen el botón
@@ -126,9 +147,9 @@ def inject_global_css() -> str:
         color: var(--fc-muted);
     }}
     div[data-testid="stTabs"] div[data-testid="stTab"][aria-selected="true"] {{
-        color: {BLUE};
-        background-color: {BLUE_LIGHT};
-        box-shadow: inset 0 -3px 0 0 {BLUE};
+        color: var(--fc-blue);
+        background-color: var(--fc-blue-soft);
+        box-shadow: inset 0 -3px 0 0 var(--fc-blue);
     }}
     div[data-testid="stTabs"] div[data-testid="stTab"] p {{
         font-size: 14.5px;
@@ -137,8 +158,8 @@ def inject_global_css() -> str:
     /* -- Bloques de la barra lateral (containers con borde) -- */
     section[data-testid="stSidebar"] div[data-testid="stLayoutWrapper"] > div[data-testid="stVerticalBlock"] {{
         border-radius: 12px !important;
-        border-color: {GRAY_200} !important;
-        background-color: rgba(29, 78, 216, 0.02);
+        border-color: var(--fc-border) !important;
+        background-color: color-mix(in srgb, var(--fc-blue) 2%, transparent);
         margin-bottom: 14px;
     }}
     .fp-sidebar-block-title {{
@@ -146,7 +167,7 @@ def inject_global_css() -> str:
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: .04em;
-        color: {INK_600};
+        color: var(--fc-muted);
         margin: 0 0 8px 0;
     }}
 
@@ -157,9 +178,9 @@ def inject_global_css() -> str:
         font-weight: 600;
         font-size: 0.9rem;
     }}
-    .confidence-alta {{ background-color: {GREEN_LIGHT}; color: {GREEN_DARK}; }}
-    .confidence-media {{ background-color: #FFF8E1; color: #E65100; }}
-    .confidence-baja {{ background-color: #FFEBEE; color: #B71C1C; }}
+    .confidence-alta {{ background-color: var(--fc-green-soft); color: var(--fc-green-ink); }}
+    .confidence-media {{ background-color: var(--fc-yellow-soft); color: var(--fc-yellow-ink); }}
+    .confidence-baja {{ background-color: var(--fc-red-soft); color: var(--fc-red-ink); }}
 
     /* -- Topbar de marca -- */
     .fp-topbar {{ display: flex; align-items: center; gap: 16px; margin-bottom: 4px; }}
@@ -169,46 +190,46 @@ def inject_global_css() -> str:
         display: flex; align-items: center; justify-content: center;
         font-size: 26px; box-shadow: 0 4px 12px rgba(29, 78, 216, 0.25);
     }}
-    .fp-topbar-title {{ font-size: 28px; font-weight: 800; color: {INK_900}; line-height: 1.15; }}
-    .fp-topbar-subtitle {{ font-size: 14px; color: {INK_600}; margin-top: 2px; }}
+    .fp-topbar-title {{ font-size: 28px; font-weight: 800; color: var(--fc-text); line-height: 1.15; }}
+    .fp-topbar-subtitle {{ font-size: 14px; color: var(--fc-muted); margin-top: 2px; }}
 
     /* -- Tarjetas de estadísticas (KPI row) -- */
     .fp-stat-row {{ display: flex; gap: 14px; flex-wrap: wrap; margin: 14px 0 22px 0; }}
     .fp-stat-card {{
         flex: 1 1 200px;
-        background: {WHITE};
-        border: 1px solid {GRAY_200};
+        background: var(--fc-surface);
+        border: 1px solid var(--fc-border);
         border-radius: 14px;
         padding: 16px 18px;
         display: flex; align-items: center; gap: 14px;
-        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+        box-shadow: var(--fc-shadow);
     }}
     .fp-stat-icon {{
         width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0;
         display: flex; align-items: center; justify-content: center; font-size: 21px;
     }}
-    .fp-accent-blue .fp-stat-icon {{ background: {BLUE_LIGHT}; color: {BLUE}; }}
-    .fp-accent-green .fp-stat-icon {{ background: {GREEN_LIGHT}; color: {GREEN_DARK}; }}
-    .fp-accent-gray .fp-stat-icon {{ background: {GRAY_100}; color: {INK_600}; }}
-    .fp-accent-amber .fp-stat-icon {{ background: #FEF3C7; color: #B45309; }}
-    .fp-stat-value {{ font-size: 25px; font-weight: 700; color: {INK_900}; line-height: 1.1; }}
-    .fp-stat-label {{ font-size: 12.5px; color: {INK_600}; margin-top: 2px; }}
+    .fp-accent-blue .fp-stat-icon {{ background: var(--fc-blue-soft); color: var(--fc-blue); }}
+    .fp-accent-green .fp-stat-icon {{ background: var(--fc-green-soft); color: var(--fc-green-ink); }}
+    .fp-accent-gray .fp-stat-icon {{ background: var(--fc-surface-2); color: var(--fc-muted); }}
+    .fp-accent-amber .fp-stat-icon {{ background: var(--fc-yellow-soft); color: var(--fc-yellow-ink); }}
+    .fp-stat-value {{ font-size: 25px; font-weight: 700; color: var(--fc-text); line-height: 1.1; }}
+    .fp-stat-label {{ font-size: 12.5px; color: var(--fc-muted); margin-top: 2px; }}
 
     /* -- Card visual del partido seleccionado -- */
     .fp-match-card {{
         display: flex; align-items: center; justify-content: space-between;
-        background: linear-gradient(135deg, {BLUE_LIGHT} 0%, {GREEN_LIGHT} 100%);
-        border: 1px solid {GRAY_200}; border-radius: 16px;
+        background: linear-gradient(135deg, var(--fc-blue-soft) 0%, var(--fc-green-soft) 100%);
+        border: 1px solid var(--fc-border); border-radius: 16px;
         padding: 18px 26px; margin: 6px 0 20px 0;
     }}
     .fp-match-team {{ flex: 1; text-align: center; min-width: 0; }}
     .fp-match-team-badge {{ font-size: 26px; margin-bottom: 2px; }}
     .fp-match-team-name {{
-        font-size: 18px; font-weight: 700; color: {INK_900};
+        font-size: 18px; font-weight: 700; color: var(--fc-text);
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }}
     .fp-match-team-role {{
-        font-size: 11px; color: {INK_600}; text-transform: uppercase;
+        font-size: 11px; color: var(--fc-muted); text-transform: uppercase;
         letter-spacing: .05em; margin-top: 2px;
     }}
     .fp-match-vs {{
@@ -227,29 +248,29 @@ def inject_global_css() -> str:
     .fp-hero-art {{ flex: 1 1 320px; min-width: 260px; max-width: 420px; }}
     .fp-hero-art svg {{ width: 100%; height: auto; display: block; }}
     .fp-pill {{
-        display: inline-block; background: {BLUE_LIGHT}; color: {BLUE_DARK};
+        display: inline-block; background: var(--fc-blue-soft); color: var(--fc-blue-ink);
         font-size: 13px; font-weight: 600; padding: 5px 14px; border-radius: 999px;
         margin-bottom: 14px;
     }}
     .fp-hero-title {{
-        font-size: 32px; font-weight: 800; color: {INK_900}; line-height: 1.25;
+        font-size: 32px; font-weight: 800; color: var(--fc-text); line-height: 1.25;
         margin: 0 0 12px 0;
     }}
-    .fp-hero-text {{ font-size: 15px; color: {INK_600}; line-height: 1.6; max-width: 46ch; }}
+    .fp-hero-text {{ font-size: 15px; color: var(--fc-muted); line-height: 1.6; max-width: 46ch; }}
 
     .fp-steps {{ display: flex; gap: 16px; flex-wrap: wrap; margin-top: 6px; }}
     .fp-step {{
         flex: 1 1 220px; display: flex; gap: 14px;
-        background: {WHITE}; border: 1px solid {GRAY_200}; border-radius: 14px;
+        background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: 14px;
         padding: 16px 18px;
     }}
     .fp-step-num {{
         flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%;
-        background: {GREEN_LIGHT}; color: {GREEN_DARK}; font-weight: 700; font-size: 14px;
+        background: var(--fc-green-soft); color: var(--fc-green-ink); font-weight: 700; font-size: 14px;
         display: flex; align-items: center; justify-content: center;
     }}
-    .fp-step-title {{ font-size: 14.5px; font-weight: 700; color: {INK_900}; }}
-    .fp-step-text {{ font-size: 13px; color: {INK_600}; margin-top: 2px; line-height: 1.45; }}
+    .fp-step-title {{ font-size: 14.5px; font-weight: 700; color: var(--fc-text); }}
+    .fp-step-text {{ font-size: 13px; color: var(--fc-muted); margin-top: 2px; line-height: 1.45; }}
     </style>
     """
 
@@ -319,7 +340,7 @@ def _hero_illustration_svg() -> str:
     return f"""
     <svg viewBox="0 0 480 320" xmlns="http://www.w3.org/2000/svg" role="img"
          aria-label="Ilustración de una cancha de fútbol con una línea de tendencia de datos">
-        <rect x="0" y="0" width="480" height="320" rx="24" fill="{GREEN_LIGHT}"/>
+        <rect x="0" y="0" width="480" height="320" rx="24" style="fill: var(--fc-green-soft)"/>
         <rect x="40" y="40" width="400" height="240" rx="14" fill="{GREEN}"/>
         <rect x="52" y="52" width="376" height="216" rx="8" fill="none" stroke="{WHITE}" stroke-width="3" opacity="0.85"/>
         <line x1="240" y1="52" x2="240" y2="268" stroke="{WHITE}" stroke-width="3" opacity="0.85"/>

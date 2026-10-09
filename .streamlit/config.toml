@@ -1,29 +1,48 @@
 # Configuración compartida de la app (los secretos van en secrets.toml, que está en .gitignore).
 [theme]
-# Tema claro fijo: los componentes propios (tarjetas, avisos) están diseñados sobre fondo claro.
+# Tema claro u oscuro según el sistema (móvil o computadora). Los componentes propios usan las
+# variables --fc-* de src/ui_theme.py, que tienen valores para los dos modos.
+# Sistema visual: tipografía Inter, bordes finos y esquinas suaves en todos los widgets.
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+headingFontWeights = [800, 700, 700, 700, 700, 700]
+baseRadius = "0.625rem"
+showWidgetBorder = true
+showSidebarBorder = true
+metricValueFontSize = "1.6rem"
+
+[theme.light]
 base = "light"
 primaryColor = "#1D4ED8"
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F1F5F9"
 textColor = "#0F172A"
-# Sistema visual: tipografía Inter, bordes finos y esquinas suaves en todos los widgets.
-# Los mismos valores están en src/ui_theme.py (variables CSS --fc-*), para que todo coincida.
-font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-headingFontWeights = [800, 700, 700, 700, 700, 700]
-baseRadius = "0.625rem"
 borderColor = "#E3E8EF"
-showWidgetBorder = true
-showSidebarBorder = true
 dataframeHeaderBackgroundColor = "#F8FAFC"
-metricValueFontSize = "1.6rem"
 blueColor = "#1D4ED8"
 greenColor = "#16A34A"
 orangeColor = "#D97706"
 redColor = "#DC2626"
 
-[theme.sidebar]
+[theme.light.sidebar]
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F1F5F9"
+
+[theme.dark]
+base = "dark"
+primaryColor = "#5B8DEF"
+backgroundColor = "#0B0F17"
+secondaryBackgroundColor = "#1A2332"
+textColor = "#E6EBF2"
+borderColor = "#263142"
+dataframeHeaderBackgroundColor = "#131A26"
+blueColor = "#5B8DEF"
+greenColor = "#3FBF6E"
+orangeColor = "#F0A43A"
+redColor = "#F26B6B"
+
+[theme.dark.sidebar]
+backgroundColor = "#0F141E"
+secondaryBackgroundColor = "#1A2332"
 
 [client]
 # Menú de Streamlit reducido: sin opciones de desarrollador para el usuario final.

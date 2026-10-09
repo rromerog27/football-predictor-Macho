@@ -318,18 +318,25 @@ La página **Partidos del día** es la que se abre por defecto al ejecutar
 `streamlit run app.py`. Cubre **33 ligas y copas** (Europa, América, copas
 internacionales y Japón). Tiene dos secciones:
 
-- **Partidos del día:** elige la fecha y, en "Ligas y copas", las
-  competiciones (por defecto 15: las 5 grandes, Portugal, Países Bajos, Liga
-  MX, Argentina, Brasil, MLS, Champions, Europa League, Libertadores y
-  Sudamericana). Cada partido muestra la barra 1X2, Over 2.5, ambos anotan,
-  el marcador más probable y, si ESPN publica cuotas, las probabilidades del
-  mercado. Una etiqueta amarilla marca el resultado al que el modelo da 10 o
-  más puntos más que el mercado (≈1 de cada 10 partidos); no es una
-  recomendación de apuesta. "Ver análisis" muestra Poisson, logística,
-  ensemble y mercado, la racha y la señal de cada equipo. En partidos ya
-  jugados muestra el resultado y si el pronóstico acertó. Si no hay partidos
-  ese día, ofrece saltar a la próxima fecha con partidos. `?fecha=AAAA-MM-DD`
-  en la URL abre la página en ese día.
+- **Partidos del día:** un panel con la fecha (con ‹ › para cambiar de día),
+  un buscador de equipos ("man u" encuentra Manchester United) y la
+  selección de ligas y copas (por defecto 15: las 5 grandes, Portugal,
+  Países Bajos, Liga MX, Argentina, Brasil, MLS, Champions, Europa League,
+  Libertadores y Sudamericana). Debajo:
+  - **Destacados**, en cuatro vistas: los favoritos más claros, los
+    partidos más parejos, donde el modelo más se aleja del mercado y, cerca
+    del inicio, los partidos con alineaciones confirmadas. Cada tarjeta lleva
+    a su partido en la tabla.
+  - **Todos los partidos**, en una tabla ordenable por hora, por liga
+    (agrupada) o por favorito. Cada fila muestra los escudos (de ESPN), la
+    barra 1X2, Over 2.5 y el pronóstico ("Parejo" si ningún resultado pasa
+    del 45%). Una etiqueta amarilla ("+11 al 1") marca dónde el modelo da 10
+    o más puntos más que el mercado (≈1 de cada 10 partidos; no es una
+    recomendación de apuesta). Al tocar una fila se despliega el análisis:
+    mercado, Poisson, logística, alineaciones, racha y señal de cada equipo.
+  - En partidos ya jugados muestra el resultado y si el pronóstico acertó.
+    Si no hay partidos ese día, ofrece saltar a la próxima fecha con
+    partidos. `?fecha=AAAA-MM-DD` en la URL abre la página en ese día.
 - **Analizar un partido:** elige liga o copa, local y visitante y pulsa
   "Correr modelo". Si el partido está en el calendario de los próximos 14
   días se usan su fecha y sus cuotas; si no, los datos disponibles hasta hoy.
@@ -337,7 +344,9 @@ internacionales y Japón). Tiene dos secciones:
 Cada competición se entrena una vez y queda en caché 3 horas (4-14 s por
 competición la primera vez); predecir cada partido es instantáneo. Las horas
 y el "día" usan la zona horaria del navegador (se puede cambiar en la barra
-lateral).
+lateral). Toda la app sigue el modo claro u oscuro del sistema
+(`.streamlit/config.toml` define los dos temas y `src/ui_theme.py`, los
+colores de los componentes propios en cada modo).
 
 Desde la terminal:
 
