@@ -8,6 +8,8 @@
   ligas frente a otras.
 - El calendario del día y las cuotas salen de ESPN en todas las competiciones
   (en las de Understat, las cuotas se cruzan por hora y nombre de equipo).
+- Córners y tarjetas (para src/corners_cards.py) también salen de ESPN: en las ligas
+  de Understat se cruzan partido a partido por fecha y nombres.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from src import espn_source, lineups, market_signal, understat_source
 from src import football_data_source as fd
 from src.match_model import (
     STANDARD_COLUMNS,
+    STAT_COLUMNS,
     LeagueData,
     LeagueModel,
     MatchPrediction,
@@ -38,6 +41,7 @@ from src.match_model import (
 UNDERSTAT_SEASONS = 5  # temporadas anteriores a la actual (la más antigua es solo historial previo)
 ESPN_LEAGUE_YEARS = 4  # años naturales de una liga de ESPN (incluido el actual)
 ESPN_CUP_YEARS = 2  # años naturales del pool de una copa (muchas ligas: se limita la descarga)
+ESPN_STATS_YEARS = 3  # años naturales de córners y tarjetas de ESPN en las ligas de Understat
 MAX_WORKERS = 8
 MIN_MAPPING_SIMILARITY = 0.85  # nombres ESPN ↔ Understat del mismo club (p. ej. "Leeds United" ↔ "Leeds")
 
@@ -192,6 +196,42 @@ def map_team_names(lower: pd.DataFrame, upper: pd.DataFrame,
     return mapping
 
 
+def attach_espn_stats(matches: pd.DataFrame, espn: pd.DataFrame, competition: str,
+                      max_gap: pd.Timedelta = pd.Timedelta(hours=36), min_similarity: float = 0.5) -> pd.DataFrame:
+    """Copia córners y tarjetas (`STAT_COLUMNS`) de los partidos de ESPN a los de la competición en
+    `matches` (de otra fuente, p. ej. Understat): misma fecha (±`max_gap`, por husos y horarios
+    distintos) y los dos nombres parecidos. Las filas sin pareja quedan con NaN."""
+    out = matches.copy()
+    for col in STAT_COLUMNS:
+        if col not in out:
+            out[col] = float("nan")
+    espn = espn[espn["played"] & espn[STAT_COLUMNS].notna().any(axis=1)].sort_values("datetime")
+    target = out[(out["competition"] == competition) & out["played"]].sort_values("datetime")
+    if espn.empty or target.empty:
+        return out
+    times = target["datetime"].to_numpy()
+    sims: dict[tuple[str, str], float] = {}
+
+    def sim(a: str, b: str) -> float:
+        if (a, b) not in sims:
+            sims[(a, b)] = team_similarity(a, b)
+        return sims[(a, b)]
+
+    taken = set()
+    for e in espn.itertuples(index=False):
+        lo = times.searchsorted((e.datetime - max_gap).to_datetime64())
+        hi = times.searchsorted((e.datetime + max_gap).to_datetime64(), side="right")
+        best, best_score = None, min_similarity
+        for idx, row in zip(target.index[lo:hi], target.iloc[lo:hi].itertuples(index=False)):
+            score = min(sim(e.home, row.home), sim(e.away, row.away))
+            if score >= best_score and idx not in taken:
+                best, best_score = idx, score
+        if best is not None:
+            taken.add(best)
+            out.loc[best, STAT_COLUMNS] = [getattr(e, c) for c in STAT_COLUMNS]
+    return out
+
+
 def espn_odds_codes(comp: Competition) -> tuple[str, ...]:
     """Competiciones cuya señal de mercado sale de las cuotas pasadas de ESPN: la propia y su pool
     (en copas), si football-data no las cubre. Una petición por partido de los últimos ~13 meses
@@ -201,10 +241,11 @@ def espn_odds_codes(comp: Competition) -> tuple[str, ...]:
 
 
 def load_competition(comp: Competition, refresh: bool = False, progress: Callable[[str], None] | None = None,
-                     include_lower: bool = True, with_market: bool = True) -> LeagueData:
+                     include_lower: bool = True, with_market: bool = True, with_stats: bool = True) -> LeagueData:
     """Descarga los datos de la competición y prepara el modelo (sin entrenarlo). Con `with_market`,
     cruza las cuotas de cierre de football-data.co.uk (y las cuotas pasadas de ESPN donde
-    football-data no llega, ver `espn_odds_codes`) como señal de mercado."""
+    football-data no llega, ver `espn_odds_codes`) como señal de mercado. Con `with_stats`, en las
+    ligas de Understat cruza los córners y tarjetas de ESPN (en las de ESPN ya vienen)."""
     now = utc_now()
     lower = comp.lower if include_lower else ()
     if comp.understat:
@@ -218,8 +259,15 @@ def load_competition(comp: Competition, refresh: bool = False, progress: Callabl
             names = map_team_names(lower_matches, matches)
             lower_matches = lower_matches.assign(home=lower_matches["home"].replace(names),
                                                  away=lower_matches["away"].replace(names))
-            matches = pd.concat([matches, lower_matches[STANDARD_COLUMNS]], ignore_index=True)
+            matches = pd.concat([matches, lower_matches[STANDARD_COLUMNS + STAT_COLUMNS]], ignore_index=True)
             sources = sources + lower_sources
+        if with_stats:
+            try:
+                stats_years = list(range(now.year - ESPN_STATS_YEARS + 1, now.year + 1))
+                espn_matches, _ = _fetch_espn_years([comp.code], stats_years, refresh, progress)
+                matches = attach_espn_stats(matches, espn_matches, comp.code)
+            except PredictionError:
+                pass  # sin córners ni tarjetas: el modelo de goles no los necesita
         if with_market:
             matches, market_sources = market_signal.attach(matches, progress, espn_odds_codes(comp))
             sources = sources + market_sources

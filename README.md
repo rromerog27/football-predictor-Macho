@@ -188,6 +188,8 @@ football_predictor/
 │   ├── lineups.py              # Alineaciones de ESPN: rotación de cada equipo y ajuste del 1X2
 │   ├── backtest.py             # Backtest de las predicciones de validación contra las cuotas de cierre
 │   ├── performance.py          # Aciertos, calibración, historial y regla de los picks (pestañas Picks y Rendimiento)
+│   ├── corners_cards.py        # Modelo por equipo de córners y tarjetas (binomial negativa) y su validación
+│   ├── markets.py              # Mercados de goles, córners y tarjetas: probabilidad, cuota justa y aciertos
 │   ├── ui_theme.py             # Botón de modo claro/oscuro y colores de los componentes propios
 │   ├── visualizations.py       # Construcción de gráficos Plotly
 │   └── utils.py                 # Utilidades comunes (safe_divide, logging, formateo)
@@ -200,6 +202,7 @@ football_predictor/
     ├── test_market_odds.py     # Pruebas de probabilidad implícita y simulación de apuestas de valor
     ├── test_fc27.py            # Pruebas de la sección FC 27 Mercado (lectura, historial, señales)
     ├── test_performance.py     # Pruebas de aciertos, calibración, historial y regla de los picks
+    ├── test_markets.py         # Pruebas de córners y tarjetas (ESPN, modelo) y de los mercados de un partido
     └── test_modelo_prediccion.py # Pruebas sin red del modelo, sus fuentes (Understat, ESPN) y el script
 ```
 
@@ -218,7 +221,7 @@ football_predictor/
 | `src/prediction_model.py` | Entrena y calibra la regresión logística de respaldo, calcula sus métricas de validación, y combina sus probabilidades con las de Poisson ponderando por desempeño de validación (log loss). |
 | `src/report_generator.py` | Exporta a CSV/Excel/HTML lo que ya calcularon los demás módulos: tabla de estadísticas, predicción de un partido, comparación de equipos, matriz de marcadores y el reporte HTML completo. |
 | `src/market_odds.py` | Convierte cuotas 1X2 a probabilidad implícita (quitando el margen de la casa), evalúa qué tan bien predice el mercado los partidos de prueba, y simula en retrospectiva una estrategia de apuestas de valor comparando el modelo contra el mercado. |
-| `views/partidos_del_dia.py` | Página Partidos del día, con cuatro pestañas: los partidos de la fecha (en la zona horaria del navegador) con la predicción y el mercado de cada uno, los picks del día, "Analizar" un partido y el rendimiento del modelo. Solo presenta: el modelo vive en `src/match_model.py` y las cuentas de picks y rendimiento en `src/performance.py`. |
+| `views/partidos_del_dia.py` | Página Partidos del día, con cinco pestañas: los partidos de la fecha (en la zona horaria del navegador) con la predicción y el mercado de cada uno, los picks del día, los mercados de goles, córners y tarjetas, "Analizar" un partido y el rendimiento del modelo. Solo presenta: el modelo vive en `src/match_model.py` y `src/corners_cards.py`, y las cuentas en `src/performance.py` y `src/markets.py`. |
 | `src/match_model.py` | Modelo independiente de la fuente: fuerza ajustada por rival (señal y goles), Poisson con Dixon-Coles, validación y predicción de un partido (con las probabilidades del mercado si hay cuotas). |
 | `src/competitions.py` | Registro de las 33 ligas y copas (fuente, región, pool de ligas de las copas), carga de sus datos, partidos del día y cruce de cuotas de ESPN con los partidos de Understat. |
 | `src/understat_source.py` | Descarga y caché del xG de Understat, convertido a las columnas estándar del modelo. |
@@ -226,8 +229,10 @@ football_predictor/
 | `src/market_signal.py` | Despeja los goles esperados que implican las cuotas de cierre de cada partido jugado (football-data.co.uk o ESPN), empareja nombres por resultados y los añade como señal de mercado. |
 | `src/lineups.py` | Lee los titulares de ESPN (~1 h antes del partido), mide cuánto rota cada equipo respecto a sus 10 partidos anteriores y ajusta el 1X2 final. |
 | `src/performance.py` | Funciones puras sobre las predicciones de validación y el backtest: aciertos del modelo y del mercado, favoritos claros, calibración por tramos, historial y la regla de los picks (y de los partidos a evitar). |
+| `src/corners_cards.py` | Modelo de córners y tarjetas por equipo: tasas a favor y en contra relativas a la media de cada competición, acercamiento a la media de la liga y binomial negativa, con la validación (línea principal y quién tiene más). |
+| `src/markets.py` | Mercados de un partido (goles desde la matriz de marcadores; córners y tarjetas desde `src/corners_cards.py`) con probabilidad, cuota justa y partido medio, los destacados del día y los aciertos de cada mercado. |
 | `src/backtest.py` | Cruza las predicciones de validación con las cuotas de cierre (football-data.co.uk o ESPN) y compara log loss, mezcla modelo + mercado, Over/Under y ROI simulado. |
-| `src/espn_source.py` | Descarga y caché del marcador de ESPN (resultados, tiros, calendario, campo neutral, cuotas de DraftKings) y cálculo del xG aproximado con tiros. |
+| `src/espn_source.py` | Descarga y caché del marcador de ESPN (resultados, tiros, córners, tarjetas, calendario, campo neutral, cuotas de DraftKings) y cálculo del xG aproximado con tiros. |
 | `src/visualizations.py` | Construye los gráficos Plotly (barras, radar, evolución de forma, mapas de calor, importancia de variables) a partir de datos ya calculados. |
 | `src/utils.py` | Funciones auxiliares compartidas: división segura, formateo de porcentajes/métricas, logging, semilla aleatoria y umbrales de suficiencia de datos. |
 
@@ -357,7 +362,7 @@ automáticas.
 
 La página **Partidos del día** es la que se abre por defecto al ejecutar
 `streamlit run app.py`. Cubre **33 ligas y copas** (Europa, América, copas
-internacionales y Japón). Tiene cuatro pestañas:
+internacionales y Japón). Tiene cinco pestañas:
 
 - **Partidos:** un panel con la fecha (con ‹ › para cambiar de día),
   un buscador de equipos ("man u" encuentra Manchester United) y la
@@ -387,6 +392,21 @@ internacionales y Japón). Tiene cuatro pestañas:
   el backtest la regla dio 753 picks y ganó el 74%, pero a cuota de cierre
   quedó en empate (ROI +0.8%): son favoritos que suelen ganar, no una fuente
   de ganancias. **No es una recomendación de apuesta.**
+- **Mercados:** goles, córners y tarjetas de los partidos del día, con la
+  probabilidad del modelo y la **cuota justa** (1 ÷ probabilidad: si una casa
+  paga más, el modelo ve valor). Arriba, **Lo más claro del día**: por
+  familia, los partidos en los que el modelo ve más claro un mercado que en un
+  partido medio de la competición está cerca del 50% (más/menos de 2.5 goles,
+  ambos anotan, quién saca más córners, la línea principal de tarjetas...),
+  con lo que pasa en un partido medio al lado. Debajo, todos los mercados de
+  un partido a elección:
+  - **Goles:** más/menos de 0.5 a 4.5, ambos anotan, doble oportunidad,
+    goles de cada equipo y ganar por 2 o más.
+  - **Córners:** total (7.5 a 12.5), quién saca más y córners de cada equipo.
+  - **Tarjetas:** total (2.5 a 6.5), quién recibe más y tarjetas de cada
+    equipo (amarillas y rojas, cada una cuenta 1).
+  Al final, **Qué tan confiable es**: los aciertos de cada mercado en los
+  partidos que el modelo no había visto, de las competiciones del día.
 - **Analizar:** elige liga o copa, local y visitante y pulsa "Correr
   modelo". Si el partido está en el calendario de los próximos 14 días se
   usan su fecha y sus cuotas; si no, los datos disponibles hasta hoy. Muestra
@@ -396,6 +416,8 @@ internacionales y Japón). Tiene cuatro pestañas:
     equipos lado a lado, con el mejor valor en negrita.
   - **Modelo y mercado:** las probabilidades 1X2 y los marcadores más
     probables.
+  - **Mercados:** goles, córners y tarjetas del partido, como en la
+    pestaña Mercados.
   - **Últimos partidos** de cada equipo (fecha, local o visitante, rival,
     resultado y xG) y **Entre ellos**, los últimos enfrentamientos.
 - **Rendimiento:** cómo le fue al modelo de cada competición con los
@@ -404,8 +426,10 @@ internacionales y Japón). Tiene cuatro pestañas:
   favoritos claros ganaron y cómo salieron los picks. Un gráfico compara lo
   que decían las probabilidades con lo que pasó, con el mercado al lado y la
   misma información en una tabla, y la lista de últimos partidos muestra el
-  pronóstico de cada uno y si acertó. El log loss, los parámetros y el ROI
-  quedan en "Detalles técnicos".
+  pronóstico de cada uno y si acertó. **Otros mercados** muestra los aciertos
+  de más/menos de 2.5 goles, ambos anotan y la línea principal y "quién tiene
+  más" de córners y tarjetas. El log loss, los parámetros y el ROI quedan en
+  "Detalles técnicos".
 
 Cada competición se entrena una vez y queda en caché 3 horas (unos segundos
 por competición la primera vez); predecir cada partido es instantáneo. Las horas
@@ -427,6 +451,10 @@ python3 modelo_prediccion.py "Arsenal" "Leeds" --backtest                       
 python3 modelo_prediccion.py --listar                                            # ligas y copas disponibles
 ```
 
+El informe de la terminal termina con **Otros mercados**: más de 1.5, 2.5 y
+3.5 goles, y córners y tarjetas esperados con sus líneas, quién tiene más y
+la validación de la competición.
+
 **Datos** (`src/competitions.py`, `src/understat_source.py`, `src/espn_source.py`).
 
 - **Understat** (xG real): Premier League, LaLiga, Bundesliga, Serie A,
@@ -445,6 +473,13 @@ python3 modelo_prediccion.py --listar                                           
   en cientos de partidos de la Championship, la segunda argentina o Chipre),
   se toma como estadística ausente y ese partido usa los goles. ESPN también da el calendario del día y las
   cuotas de las ligas de Understat (cruzadas por hora y nombre de equipo).
+- **Córners y tarjetas** (ESPN, en todas las competiciones): córners de cada
+  equipo (`wonCorners`) y tarjetas de la lista de incidencias del partido
+  (amarillas y rojas). En las ligas de Understat se cruzan partido a partido
+  (fecha ±36 h y nombres) con los últimos 3 años de ESPN: 98% de los partidos
+  de la Premier desde 2024. 0 córners de los dos equipos se toma como dato
+  ausente, igual que un partido sin incidencias. Uruguay no publica córners
+  ni tarjetas y Paraguay casi no publica córners.
 - **Copas internacionales** (Champions, Europa League, Conference League,
   Libertadores, Sudamericana, Concacaf Champions Cup): se modelan junto con
   las ligas de sus participantes (20 ligas UEFA, 10 CONMEBOL, 5 CONCACAF),
@@ -654,6 +689,52 @@ Resultado en 7.325 partidos de las 21 competiciones:
 
 Desde la terminal: `python3 modelo_prediccion.py "Arsenal" "Leeds" --backtest`.
 
+**Córners y tarjetas** (`src/corners_cards.py`, `src/markets.py`). Un modelo
+aparte del de goles, por equipo:
+
+1. Cada equipo tiene una tasa a favor y otra en contra, relativas a la media
+   de la competición de cada partido (local y visitante por separado), con
+   suavizado exponencial (vida media de 40 partidos) y encogidas hacia la
+   media con 20 partidos "de media".
+2. Esperado del local = media del local en la competición × su tasa a favor
+   × la tasa en contra del visitante (y al revés).
+3. Lo esperado se acerca a la media de la liga en la proporción que mejor
+   predijo el entrenamiento (por separado para lo de cada equipo y para el
+   total), y las cantidades siguen una binomial negativa con la dispersión
+   ajustada con las predicciones previas a cada partido.
+4. Los mercados de goles salen de la matriz de marcadores del modelo
+   (reescalada al 1X2 final); "partido medio" usa los goles medios de la
+   competición.
+
+Validación (el 30% más reciente de cada competición, cada partido predicho
+solo con los anteriores; 31 competiciones con córners y 32 con
+tarjetas):
+
+| Mercado | Partidos | Acierta | Con 65% o más (partidos · acierta · decía) |
+|---|---|---|---|
+| Más/menos de 2.5 goles (33 competiciones) | 15.617 | 56% | 10% · 68% · 69% |
+| Ambos anotan | 15.617 | 56% | 3% · 68% · 67% |
+| Más/menos de la línea principal de córners (9.5 o 10.5) | 8.114 | 56% | 8% · 65% · 69% |
+| Quién saca más córners (empate = fallo) | 8.114 | 58% | 20% · **74%** |
+| Más/menos de la línea principal de tarjetas (2.5 a 5.5) | 9.576 | 59% | 21% · 69% · 69% |
+| Quién recibe más tarjetas (empate = fallo) | 9.576 | 46% | casi nunca |
+
+- En goles, cuando el modelo da 65% o más acierta lo que dice; pasa en pocos
+  partidos porque el total de goles es casi una moneda al aire.
+- **Quién saca más córners** es lo más útil: los equipos que dominan sacan
+  más córners, y con 65% o más acierta 3 de cada 4.
+- En los **totales**, el modelo mejora poco a usar la media de la liga
+  (log loss 0.6825 frente a 0.6854 en córners, 0.6702 frente a 0.6749 en
+  tarjetas; mejor en 25 de 31 y 24 de 32 competiciones): lo que más pesa es
+  la liga. En córners, con 65% o más se pasa un poco de confiado (65% real
+  frente a 69%). En tarjetas falta el árbitro, que pesa mucho y ESPN no
+  publica en el marcador.
+- En 6.065 partidos de 18 ligas europeas (2025/26, football-data, con el
+  mismo método) los resultados fueron parecidos: quién saca más córners 64%
+  sin contar empates (77% en el cuarto de partidos más desparejos).
+- No hay cuotas pasadas de córners ni de tarjetas: no se puede comprobar si
+  el modelo le gana al mercado, solo sus aciertos.
+
 ## Formato de archivo esperado
 
 El caso principal soportado es el formato **football-data.co.uk**, como el
@@ -721,4 +802,5 @@ están completas.
 alcance por ahora): Random Forest / Gradient Boosting / XGBoost como
 alternativas al modelo de respaldo, SHAP para explicabilidad, exportación
 a PDF, matriz de marcadores como imagen (PNG) en vez de CSV, tema oscuro
-nativo, mercados de córners y tarjetas cuando el archivo lo permita.
+nativo, mercados de córners y tarjetas en el Predictor de archivos cuando el
+archivo lo permita (en Partidos del día ya están, con datos de ESPN).

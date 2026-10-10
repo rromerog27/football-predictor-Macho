@@ -3,9 +3,10 @@
 Usa el marcador público de ESPN
 (`https://site.api.espn.com/apis/site/v2/sports/soccer/<slug>/scoreboard`):
 `dates=AAAA&limit=1000` devuelve el año natural completo y `dates=AAAAMMDD` un
-día. Cada evento trae goles, tiros y tiros a puerta de los partidos jugados,
-si se jugó en campo neutral y, en los partidos por jugar, las cuotas de
-DraftKings (moneyline 1X2 y Over/Under).
+día. Cada evento trae goles, tiros, tiros a puerta, córners y tarjetas
+(amarillas y rojas, de la lista de incidencias) de los partidos jugados, si se
+jugó en campo neutral y, en los partidos por jugar, las cuotas de DraftKings
+(moneyline 1X2 y Over/Under).
 
 Como no hay xG, la señal de calidad de ocasiones es un **xG aproximado**:
 `XG_PER_SHOT_ON_TARGET · tiros a puerta + XG_PER_SHOT_OFF_TARGET · tiros fuera`.
@@ -14,8 +15,8 @@ ESPN en 5.838 partidos-equipo de las 5 grandes ligas (2025-2026), cruzados por
 fecha y nombre: el xG aproximado correlaciona 0.73 con el xG real (los goles,
 0.61), con coeficientes estables entre ligas (0.21-0.25 por tiro a puerta).
 
-Caché en disco recortada a los campos usados: los años pasados no caducan; el
-año en curso, a las 3 horas.
+Caché en disco recortada a los campos usados (con versión: si cambian los campos,
+se vuelve a bajar): los años pasados no caducan; el año en curso, a las 3 horas.
 """
 
 from __future__ import annotations
@@ -30,13 +31,14 @@ import numpy as np
 import pandas as pd
 import requests
 
-from src.match_model import PredictionError, SourceInfo
+from src.match_model import STAT_COLUMNS, PredictionError, SourceInfo
 from src.utils import CONNECT_TIMEOUT_S, write_atomic
 
 ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) football-predictor-macho"}
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "espn_cache"
 CURRENT_YEAR_CACHE_TTL_S = 3 * 3600
+CACHE_VERSION = "v3"  # v3: córners y tarjetas
 XG_PER_SHOT_ON_TARGET = 0.2295
 XG_PER_SHOT_OFF_TARGET = 0.0647
 EXTRA_TIME_STATUSES = {"STATUS_FINAL_AET", "STATUS_FINAL_PEN"}
@@ -101,6 +103,20 @@ def _stat(competitor: dict, name: str) -> float | None:
     return None
 
 
+def _card_counts(competition: dict) -> dict[str, int] | None:
+    """Tarjetas (amarillas y rojas, cada una cuenta 1) por id de equipo según la lista de incidencias
+    del partido. None si ESPN no publica incidencias (no se sabe si hubo tarjetas)."""
+    details = competition.get("details")
+    if not details:
+        return None
+    counts: dict[str, int] = {}
+    for d in details:
+        if d.get("yellowCard") or d.get("redCard"):
+            team_id = str((d.get("team") or {}).get("id"))
+            counts[team_id] = counts.get(team_id, 0) + 1
+    return counts
+
+
 def trim_event(event: dict) -> dict | None:
     """Evento de ESPN → dict compacto con lo que usa el modelo (None si se descarta)."""
     status = (event.get("status") or {}).get("type") or {}
@@ -111,17 +127,21 @@ def trim_event(event: dict) -> dict | None:
     sides = {c.get("homeAway"): c for c in competition.get("competitors") or []}
     if "home" not in sides or "away" not in sides:
         return None
+    cards = _card_counts(competition) if status.get("completed") else None
 
     def side(c: dict) -> dict:
         team = c.get("team") or {}
         score = c.get("score")
+        team_id = str(team.get("id"))
         return {
-            "id": str(team.get("id")),
+            "id": team_id,
             "name": team.get("displayName") or team.get("name"),
             "abbr": team.get("abbreviation") or "",
             "score": float(score) if score not in (None, "") else None,
             "shots": _stat(c, "totalShots"),
             "sot": _stat(c, "shotsOnTarget"),
+            "corners": _stat(c, "wonCorners"),
+            "cards": cards.get(team_id, 0) if cards is not None else None,
         }
 
     return {
@@ -154,7 +174,7 @@ def _get_events(session: requests.Session, slug: str, params: dict) -> list[dict
 def fetch_year(session: requests.Session, slug: str, year: int, current_year: int,
                refresh: bool = False) -> tuple[list[dict], SourceInfo]:
     url = f"{ESPN}/{slug}/scoreboard?dates={year}"
-    cache_file = CACHE_DIR / f"{slug}_{year}.json"
+    cache_file = CACHE_DIR / f"{slug}_{year}.{CACHE_VERSION}.json"
     if not refresh and cache_file.exists():
         age = time.time() - cache_file.stat().st_mtime
         if year < current_year or age < CURRENT_YEAR_CACHE_TTL_S:
@@ -294,8 +314,17 @@ def pseudo_xg(shots, sot):
     return XG_PER_SHOT_ON_TARGET * sot + XG_PER_SHOT_OFF_TARGET * np.clip(shots - sot, 0, None)
 
 
+def _pair(h: dict, a: dict, key: str, played: bool, zero_is_missing: bool) -> tuple[float, float]:
+    """Estadística de los dos equipos (NaN si falta, o si ambos tienen 0 y eso indica que ESPN rellenó)."""
+    hv, av = h.get(key), a.get(key)
+    if not played or hv is None or av is None or (zero_is_missing and hv + av == 0):
+        return np.nan, np.nan
+    return float(hv), float(av)
+
+
 def events_frame(events: list[dict], competition: str) -> pd.DataFrame:
-    """Eventos recortados → columnas estándar (señal = xG aproximado si hay tiros)."""
+    """Eventos recortados → columnas estándar (señal = xG aproximado si hay tiros) y, si ESPN los
+    publica, córners y tarjetas de cada equipo (`STAT_COLUMNS` del modelo)."""
     rows = []
     for e in events:
         h, a, odds = e["home"], e["away"], e["odds"] or {}
@@ -303,6 +332,8 @@ def events_frame(events: list[dict], competition: str) -> pd.DataFrame:
         # Sin estadística, o 0 tiros de ambos equipos (ESPN rellena con ceros en algunas ligas): sin señal.
         has_shots = (all(v is not None for v in (h["shots"], h["sot"], a["shots"], a["sot"]))
                      and h["shots"] + a["shots"] > 0)
+        h_corners, a_corners = _pair(h, a, "corners", played, zero_is_missing=True)
+        h_cards, a_cards = _pair(h, a, "cards", played, zero_is_missing=False)
         rows.append(
             {
                 "id": f"espn:{e['id']}",
@@ -322,11 +353,12 @@ def events_frame(events: list[dict], competition: str) -> pd.DataFrame:
                 "odds_h": odds.get("home", np.nan), "odds_d": odds.get("draw", np.nan),
                 "odds_a": odds.get("away", np.nan),
                 "odds_over25": odds.get("over25", np.nan), "odds_under25": odds.get("under25", np.nan),
+                "h_corners": h_corners, "a_corners": a_corners, "h_cards": h_cards, "a_cards": a_cards,
             }
         )
     columns = ["id", "competition", "season", "datetime", "home", "away", "home_id", "away_id", "home_abbr",
                "away_abbr", "played", "extra_time", "neutral", "hg", "ag", "h_sig", "a_sig", "odds_h", "odds_d",
-               "odds_a", "odds_over25", "odds_under25"]
+               "odds_a", "odds_over25", "odds_under25", *STAT_COLUMNS]
     return pd.DataFrame(rows, columns=columns)
 
 

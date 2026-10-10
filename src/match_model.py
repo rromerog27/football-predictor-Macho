@@ -44,6 +44,9 @@ STANDARD_COLUMNS = [
     "id", "competition", "season", "datetime", "home", "away", "played", "extra_time", "neutral",
     "hg", "ag", "h_sig", "a_sig", "odds_h", "odds_d", "odds_a", "odds_over25", "odds_under25",
 ]
+# Columnas opcionales: córners y tarjetas de cada equipo (de ESPN; NaN donde no hay). Las usa
+# src/corners_cards.py, no el modelo de goles.
+STAT_COLUMNS = ["h_corners", "a_corners", "h_cards", "a_cards"]
 
 N_RECENT = 10  # partidos recientes que definen la forma
 N_FORM = 5  # partidos para la racha de puntos
@@ -929,6 +932,7 @@ class MatchPrediction:
     base_away: float = float("nan")
     lineups: object | None = field(default=None, repr=False)  # src.lineups.LineupInfo si se aplicaron
     p_before_lineups: np.ndarray | None = None  # 1X2 antes del ajuste por alineaciones (= p_model)
+    matrix: np.ndarray | None = field(default=None, repr=False)  # marcadores (reescalada al 1X2 final)
 
     @property
     def signal_short(self) -> str:
@@ -1039,6 +1043,7 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
         base_away=float(base_a) * ka,
         lineups=lineups,
         p_before_lineups=p_before_lineups,
+        matrix=final_matrix,
     )
 
 
