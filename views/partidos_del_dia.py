@@ -33,6 +33,8 @@ from src import espn_source
 from src import football_data_source as fd
 from src import lineups
 from src import match_model as mm
+from src import corners_cards as cc
+from src import markets
 from src import performance as perf
 
 MODEL_TTL_S = 3 * 3600  # igual que la caché del año/temporada en curso: el modelo ve los resultados nuevos
@@ -54,7 +56,7 @@ MONTHS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agost
           "noviembre", "diciembre"]
 HIGHLIGHTS = ["Más claros", "Más parejos", "Vs mercado", "XI confirmados"]
 SORTS = ["Hora", "Liga", "Más claros"]
-VIEWS = ["Partidos", "Picks", "Analizar", "Rendimiento"]
+VIEWS = ["Partidos", "Picks", "Mercados", "Analizar", "Rendimiento"]
 # La regla de los picks en el backtest de 29 competiciones (8.846 partidos con cuotas de cierre, octubre de 2026):
 # (picks, proporción que ganó, ROI a cuota de cierre). Ver README.
 PICKS_BACKTEST = (753, 0.737, 0.008)
@@ -175,6 +177,42 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
 .pd-pick-grid span { display: block; font-size: .66rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
   color: var(--fc-faint); }
 .pd-pick-grid b { font-size: .98rem; font-weight: 800; color: var(--fc-text); font-variant-numeric: tabular-nums; }
+
+/* -- Mercados: goles, córners y tarjetas con probabilidad y cuota justa -- */
+.pd-mk-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 6px; }
+.pd-mk-card { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
+  box-shadow: var(--fc-shadow); padding: 12px 14px; min-width: 0; }
+.pd-mk-title { font-size: .95rem; font-weight: 800; color: var(--fc-text); letter-spacing: -.01em; }
+.pd-mk-sub { font-size: .74rem; color: var(--fc-muted); margin: 2px 0 4px; line-height: 1.4; }
+.pd-mk-label { font-size: .64rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--fc-faint); margin: 12px 0 2px; }
+.pd-mk { width: 100%; border-collapse: collapse; font-size: .8rem; font-variant-numeric: tabular-nums; table-layout: fixed;
+  border: none; margin: 0; }
+.pd-mk th, .pd-mk td, .pd-mini th, .pd-mini td { border-left: none; border-right: none; }
+.pd-mk th { border-top: none; border-bottom: none; }
+.pd-mk th { font-size: .64rem; font-weight: 700; color: var(--fc-faint); text-align: right; padding: 2px 0 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-mk th:first-child, .pd-mk td:first-child { text-align: left; }
+.pd-mk td { text-align: right; padding: 5px 0; border-top: 1px solid var(--fc-border); color: var(--fc-text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-mk td:first-child { color: var(--fc-muted); }
+.pd-mk td small { color: var(--fc-faint); font-size: .68rem; margin-left: 4px; }
+.pd-mk.stack td small { display: block; margin: 1px 0 0; line-height: 1.1; }
+.pd-mk td.hot { font-weight: 800; }
+.pd-mk td.hot span { background: var(--fc-blue-soft); color: var(--fc-blue-ink); border-radius: 4px; padding: 1px 4px; }
+.pd-mk-empty { font-size: .8rem; color: var(--fc-muted); line-height: 1.5; margin-top: 6px; }
+.pd-mk-hl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 6px; }
+.pd-mk-hl .pd-mk-card { padding: 10px 0 4px; }
+.pd-mk-hl .pd-mk-title { padding: 0 14px 6px; }
+.pd-mk-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; align-items: center;
+  padding: 7px 14px; border-top: 1px solid var(--fc-border); }
+.pd-mk-row .what { font-size: .84rem; font-weight: 700; color: var(--fc-text); min-width: 0; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.pd-mk-row .match { grid-column: 1; font-size: .72rem; color: var(--fc-muted); min-width: 0; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.pd-mk-row .p { grid-row: 1 / span 2; grid-column: 2; text-align: right; font-weight: 800; font-size: .95rem;
+  font-variant-numeric: tabular-nums; color: var(--fc-text); }
+.pd-mk-row .p small { display: block; font-size: .68rem; font-weight: 600; color: var(--fc-faint); }
 
 /* -- Analizar: escudos grandes, cara a cara, últimos partidos e historial entre ellos -- */
 .pd-crest.lg { width: 32px; height: 32px; }
@@ -318,8 +356,9 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
   .pd-hist-row > .pd-hist-pick { grid-area: pick; justify-self: start; max-width: 100%; }
   .pd-rec-row { grid-template-columns: 58px 14px minmax(0, 1fr) 56px 54px; gap: 6px; padding: 7px 12px; font-size: .8rem; }
   .pd-rec-row .pd-hist-date { font-size: .72rem; }
-  .st-key-pd_view button { padding-left: 10px; padding-right: 10px; }
-  .st-key-pd_view button p { font-size: .88rem; }
+  .st-key-pd_view button { padding-left: 7px; padding-right: 7px; }
+  .st-key-pd_view button p { font-size: .78rem; }
+  .pd-mk-grid, .pd-mk-hl { grid-template-columns: minmax(0, 1fr); }
   .pd-cols { display: none; }
   .pd-row > summary { grid-template-columns: 48px minmax(0, 1fr) 96px; grid-template-areas:
       "time teams pick" "probs probs over"; gap: 8px 10px; padding: 10px 12px; }
@@ -375,13 +414,20 @@ def _next_kickoff(codes: tuple[str, ...], after: pd.Timestamp) -> pd.Timestamp |
 
 @st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
 def _competition_model(code: str) -> mm.LeagueModel:
-    """Descarga los datos de la competición y ajusta el modelo (lo caro: una vez cada pocas horas)."""
+    """Descarga los datos de la competición (con córners y tarjetas) y ajusta el modelo de goles (lo caro:
+    una vez cada pocas horas)."""
     return mm.train_league(comps.load_competition(comps.BY_CODE[code]))
 
 
 @st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
 def _backtest(code: str) -> backtest.BacktestResult:
     return backtest.run(_competition_model(code))
+
+
+@st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
+def _count_models(code: str) -> dict[str, cc.CountModel]:
+    """Modelos de córners y tarjetas de la competición (los que tienen datos de ESPN)."""
+    return cc.fit_all(_competition_model(code).data)
 
 
 @st.cache_data(ttl=LINEUP_TTL_S, show_spinner=False)
@@ -1178,6 +1224,200 @@ def section_picks(tz: str) -> None:
             st.markdown(_record_html(record.head(40), tz), unsafe_allow_html=True)
 
 
+# ---------------------------------------------------------------------------
+# Mercados: goles, córners y tarjetas
+# ---------------------------------------------------------------------------
+
+
+def _count_models_or_none(code: str) -> dict[str, cc.CountModel]:
+    try:
+        return _count_models(code)
+    except Exception:  # noqa: BLE001 — sin córners ni tarjetas, los goles siguen
+        return {}
+
+
+def _match_markets(code: str, pred: mm.MatchPrediction
+                   ) -> tuple[dict[str, list[markets.Selection]], dict[str, cc.CountForecast]]:
+    """Selecciones de cada familia (Goles, Córners, Tarjetas) y lo esperado de córners y tarjetas."""
+    groups = {"Goles": markets.goal_selections(pred)}
+    forecasts = {}
+    for stat, model in _count_models_or_none(code).items():
+        try:
+            fc = cc.forecast(model, pred.home, pred.away, pred.competition, pred.match_id, pred.neutral)
+        except (KeyError, ValueError):
+            continue
+        forecasts[stat] = fc
+        groups[fc.label] = markets.count_selections(fc, pred.home, pred.away)
+    return groups, forecasts
+
+
+def _mk_cell(sel: markets.Selection | None) -> str:
+    if sel is None:
+        return "<td>—</td>"
+    base = f"Partido medio de la competición: {sel.base:.0%} · " if sel.base is not None else ""
+    title = f"{base}cuota justa {sel.fair_odds:.2f}"
+    hot = " class='hot'" if sel.p >= markets.CONFIDENT else ""
+    return f"<td{hot} title='{_esc(title)}'><span>{sel.p:.0%}</span><small>{sel.fair_odds:.2f}</small></td>"
+
+
+def _mk_table(head: list[str], rows: list[tuple[str | None, list[markets.Selection | None]]]) -> str:
+    """Tabla de probabilidades: una columna de etiqueta (si la fila la trae) y una por selección. Con tres
+    columnas de valores o más, la cuota justa va debajo del porcentaje para que entre."""
+    labeled = rows[0][0] is not None
+    n_values = len(head) - (1 if labeled else 0)
+    cols = ("<col style='width:33%'>" if labeled else "") + "<col>" * n_values
+    thead = "<tr>" + "".join(f"<th title='{_esc(h)}'>{_esc(h)}</th>" for h in head) + "</tr>"
+    body = "".join("<tr>" + (f"<td title='{_esc(label)}'>{_esc(label)}</td>" if labeled else "")
+                   + "".join(_mk_cell(c) for c in cells) + "</tr>" for label, cells in rows)
+    stack = " stack" if n_values >= 3 else ""
+    return f"<table class='pd-mk{stack}'><colgroup>{cols}</colgroup>{thead}{body}</table>"
+
+
+def _find(sels: list[markets.Selection], market: str, label: str) -> markets.Selection | None:
+    return next((s for s in sels if s.market == market and s.label == label), None)
+
+
+def _over_under_table(sels: list[markets.Selection], market: str, lines: tuple[float, ...]) -> str:
+    rows = [(f"{line:g}", [_find(sels, market, f"Más de {line:g}"), _find(sels, market, f"Menos de {line:g}")])
+            for line in lines]
+    return _mk_table(["Línea", "Más", "Menos"], rows)
+
+
+def _team_lines_table(sels: list[markets.Selection], prefix: str, home: str, away: str,
+                      lines: tuple[float, ...]) -> str:
+    rows = [(name, [_find(sels, f"{prefix} de {name}", f"Más de {line:g}") for line in lines]) for name in (home, away)]
+    return _mk_table(["Más de"] + [f"{line:g}" for line in lines], rows)
+
+
+def _goals_card(pred: mm.MatchPrediction, sels: list[markets.Selection]) -> str:
+    base = pred.base_home + pred.base_away
+    sub = (f"Esperados {pred.lam_home + pred.lam_away:.1f} ({pred.lam_home:.1f} – {pred.lam_away:.1f})"
+           + (f" · partido medio {base:.1f}" if np.isfinite(base) else ""))
+    dc = [_find(sels, "Doble oportunidad", c) for c in ("1X", "X2", "12")]
+    by2 = [_find(sels, "Ganar por 2 o más", n) for n in (pred.home, pred.away)]
+    return ("<div class='pd-mk-card'><div class='pd-mk-title'>Goles</div>"
+            f"<div class='pd-mk-sub'>{_esc(sub)}</div>"
+            f"<div class='pd-mk-label'>Total</div>{_over_under_table(sels, 'Total de goles', markets.GOAL_LINES)}"
+            "<div class='pd-mk-label'>Ambos anotan · doble oportunidad</div>"
+            + _mk_table(["", "Sí", "No"], [("Ambos anotan", [_find(sels, "Ambos anotan", "Sí"),
+                                                             _find(sels, "Ambos anotan", "No")])])
+            + _mk_table(["", "1X", "X2", "12"], [("Doble oport.", dc)])
+            + "<div class='pd-mk-label'>Goles de cada equipo</div>"
+            + _team_lines_table(sels, "Goles", pred.home, pred.away, markets.TEAM_GOAL_LINES)
+            + "<div class='pd-mk-label'>Gana por 2 o más</div>"
+            + _mk_table([pred.home, pred.away], [(None, by2)])
+            + "</div>")
+
+
+def _count_card(fc: cc.CountForecast | None, sels: list[markets.Selection] | None, label: str,
+                pred: mm.MatchPrediction) -> str:
+    if fc is None or not sels:
+        return (f"<div class='pd-mk-card'><div class='pd-mk-title'>{label}</div><div class='pd-mk-empty'>"
+                "ESPN no publica este dato para esta competición (o hay muy pocos partidos con él).</div></div>")
+    spec = cc.STATS[fc.stat]
+    unit = label.lower()
+    sub = (f"Esperados {fc.mu_total:.1f} ({fc.mu_home:.1f} – {fc.mu_away:.1f}) · partido medio "
+           f"{fc.league_home + fc.league_away:.1f}" + (" · pocos datos de algún equipo" if fc.low_data else ""))
+    market = "Quién saca más córners" if fc.stat == "corners" else "Quién recibe más tarjetas"
+    more = [_find(sels, market, k) for k in (pred.home, "Iguales", pred.away)]
+    return (f"<div class='pd-mk-card'><div class='pd-mk-title'>{label}</div><div class='pd-mk-sub'>{_esc(sub)}</div>"
+            f"<div class='pd-mk-label'>Total</div>{_over_under_table(sels, f'Total de {unit}', spec['total_lines'])}"
+            f"<div class='pd-mk-label'>{'Quién saca más' if fc.stat == 'corners' else 'Quién recibe más'}</div>"
+            + _mk_table([pred.home, "Iguales", pred.away], [(None, more)])
+            + f"<div class='pd-mk-label'>{label} de cada equipo</div>"
+            + _team_lines_table(sels, label, pred.home, pred.away, spec["team_lines"])
+            + "</div>")
+
+
+def _market_tables_html(pred: mm.MatchPrediction, groups: dict, forecasts: dict) -> str:
+    return ("<div class='pd-mk-grid'>" + _goals_card(pred, groups["Goles"])
+            + _count_card(forecasts.get("corners"), groups.get("Córners"), "Córners", pred)
+            + _count_card(forecasts.get("cards"), groups.get("Tarjetas"), "Tarjetas", pred) + "</div>")
+
+
+def _mk_highlights_html(entries: list[tuple[DayItem, dict, dict]], tz: str, per_family: int = 8) -> str:
+    cards = []
+    for family in markets.FAMILIES:
+        best = []
+        for it, groups, forecasts in entries:
+            low = any(fc.low_data for fc in forecasts.values() if fc.label == family)
+            sel = markets.highlight(groups.get(family, [])) if not low else None
+            if sel is not None:
+                best.append((sel, it))
+        best.sort(key=lambda x: -x[0].p)
+        rows = "".join(
+            f"<div class='pd-mk-row'><span class='what' title='{_esc(sel.text)}'>{_esc(sel.text)}</span>"
+            f"<span class='p'>{sel.p:.0%}<small>cuota {sel.fair_odds:.2f}</small>"
+            f"<small title='En un partido medio de la competición'>medio {sel.base:.0%}</small></span>"
+            f"<span class='match'>{_local(it.row['datetime'], tz):%H:%M} · {_esc(it.row['home'])} – "
+            f"{_esc(it.row['away'])}</span></div>"
+            for sel, it in best[:per_family])
+        if not rows:
+            rows = "<div class='pd-mk-row'><span class='match'>Ningún partido llega al 60% en estos mercados.</span></div>"
+        cards.append(f"<div class='pd-mk-card'><div class='pd-mk-title'>{family}</div>{rows}</div>")
+    return f"<div class='pd-mk-hl'>{''.join(cards)}</div>"
+
+
+def _checks_html(checks: list[markets.Check]) -> str:
+    head = ("<tr><th>Mercado</th><th>Acierta</th>"
+            "<th title='Partidos en que el modelo daba 65% o más a un lado'>Con 65% o más</th></tr>")
+    rows = []
+    for c in checks:
+        conf = (f"{c.confident_hits / c.confident_n:.0%} <small>de {c.confident_n:,}".replace(",", ".")
+                + (f" · decía {c.confident_mean:.0%}" if np.isfinite(c.confident_mean) else "") + "</small>"
+                if c.confident_n else "<small>ninguno</small>")
+        rows.append(f"<tr><td>{_esc(c.market)} <small>· {c.n:,} partidos</small></td>".replace(",", ".")
+                    + f"<td>{c.hits / c.n:.0%}</td><td>{conf}</td></tr>")
+    return f"<div class='pd-card'><table class='pd-mini'>{head}{''.join(rows)}</table></div>"
+
+
+@st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
+def _competition_checks(code: str) -> list[list[markets.Check]]:
+    """Aciertos de goles, córners y tarjetas de la competición en sus partidos de validación."""
+    model = _competition_model(code)
+    val = model.trained.val_predictions
+    focus = val[val["competition"] == code]
+    groups = [markets.goal_checks(focus if len(focus) >= 30 else val, model.trained.rho)]
+    groups += [markets.count_checks(m) for m in _count_models_or_none(code).values()]
+    return groups
+
+
+def section_markets(tz: str) -> None:
+    st.markdown(
+        "<div class='pd-note'>Probabilidad del modelo para cada mercado y su <b>cuota justa</b> (1 ÷ probabilidad): "
+        "si tu casa paga más que eso, el modelo ve valor. Pasá el mouse (o tocá) una celda para ver lo que pasa en "
+        "un partido medio de la competición. Córners y tarjetas salen de un modelo aparte por equipo con datos de "
+        "ESPN: aciertan bien quién saca más córners y poco más que la media de la liga en los totales. "
+        "<b>No es una recomendación de apuesta.</b></div>", unsafe_allow_html=True)
+    ctx = _day_context(tz)
+    if ctx is None:
+        return
+    items = [it for it in ctx.items if it.pred is not None and _matches_query(it.row, ctx.query)]
+    _day_summary(ctx, tz)
+    if not items:
+        st.markdown("<div class='pd-empty'>Ningún partido con predicción para mostrar.</div>", unsafe_allow_html=True)
+        return
+    with st.spinner("Calculando córners y tarjetas…"):
+        entries = [(it, *_match_markets(it.code, it.pred)) for it in items]
+
+    _section_title("Lo más claro del día", "Mercados que en un partido medio están cerca del 50%")
+    st.markdown(_mk_highlights_html(entries, tz), unsafe_allow_html=True)
+
+    _section_title("Mercados de un partido", "En azul, 65% o más · el número chico es la cuota justa")
+    keys = [it.key for it, _, _ in entries]
+    labels = {it.key: f"{_local(it.row['datetime'], tz):%H:%M} · {it.row['home']} – {it.row['away']} · "
+                      f"{comps.BY_CODE[it.code].name}" for it, _, _ in entries}
+    chosen = st.selectbox("Partido", keys, format_func=labels.get, key=f"pd_mk_match_{ctx.day}",
+                          label_visibility="collapsed")
+    it, groups, forecasts = entries[keys.index(chosen)]
+    st.markdown(_market_tables_html(it.pred, groups, forecasts), unsafe_allow_html=True)
+
+    _section_title("Qué tan confiable es", "Partidos que el modelo no había visto, de las competiciones del día")
+    checks = markets.merge_checks([g for code in dict.fromkeys(i.code for i in items)
+                                   for g in _competition_checks(code)])
+    st.markdown(_checks_html(checks), unsafe_allow_html=True)
+
+
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def _espn_team_ids(code: str) -> dict[str, str]:
     """Nombre de ESPN → id de equipo (para los escudos), del listado de equipos de la competición."""
@@ -1327,6 +1567,10 @@ def section_manual(tz: str) -> None:
         _section_title("Modelo y mercado")
         st.markdown(f"<div class='pd-card pd-detail'>{_model_table_html(pred)}{_model_footer_html(pred)}</div>",
                     unsafe_allow_html=True)
+    _section_title("Mercados", "En azul, 65% o más · el número chico es la cuota justa")
+    with st.spinner("Calculando córners y tarjetas…"):
+        groups, forecasts = _match_markets(code, pred)
+    st.markdown(_market_tables_html(pred, groups, forecasts), unsafe_allow_html=True)
     _section_title("Últimos partidos", "L = local · V = visitante")
     c1, c2 = st.columns(2)
     for col, name, snap, cid in ((c1, pred.home, pred.home_snap, crest_ids[0]),
@@ -1565,6 +1809,11 @@ def section_performance(tz: str) -> None:
     _section_title("Últimos partidos", note)
     st.markdown(_history_html(hist.head(15), tz), unsafe_allow_html=True)
 
+    _section_title("Otros mercados", "Línea principal de cada uno y quién tiene más")
+    with st.spinner("Calculando córners y tarjetas…"):
+        checks = [c for group in _competition_checks(code) for c in group]
+    st.markdown(_checks_html(checks), unsafe_allow_html=True)
+
     with st.expander("Detalles técnicos: log loss, parámetros y ROI"):
         _technical_details(model, r)
 
@@ -1591,6 +1840,8 @@ view = st.segmented_control("Sección", VIEWS, default="Partidos", key="pd_view"
 
 if view == "Picks":
     section_picks(tz)
+elif view == "Mercados":
+    section_markets(tz)
 elif view == "Analizar":
     section_manual(tz)
 elif view == "Rendimiento":

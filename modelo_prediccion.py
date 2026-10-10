@@ -23,7 +23,9 @@ import sys
 
 from src import backtest
 from src import competitions as comps
+from src import corners_cards as cc
 from src import lineups
+from src import markets
 from src import match_model as mm
 
 SEP = "=" * 50
@@ -86,7 +88,7 @@ def lineup_lines(pred: mm.MatchPrediction) -> list[str]:
     return out
 
 
-def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
+def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool, counts: dict | None = None) -> str:
     t, h, a = pred.trained, pred.home_snap, pred.away_snap
     att_h, def_h = pred.attack_defense("home")
     att_a, def_a = pred.attack_defense("away")
@@ -169,8 +171,42 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool) -> str:
         ]
         if pred.market["over25"] is not None:
             out.append(f"- Over 2.5 mercado: {pct(pred.market['over25'])} (modelo {pct(pred.over25)})")
+    if counts is not None:
+        out += markets_lines(pred, counts)
     out.append(SEP)
     return "\n".join(out)
+
+
+def markets_lines(pred: mm.MatchPrediction, counts: dict) -> list[str]:
+    """Goles por línea y, si ESPN publica los datos de la competición, córners y tarjetas."""
+    goals = markets.goal_selections(pred)
+
+    def p(sels, market, label):
+        sel = next(s for s in sels if s.market == market and s.label == label)
+        return f"{pct(sel.p)} (cuota justa {sel.fair_odds:.2f})"
+
+    out = [SEP, "📐 OTROS MERCADOS (probabilidad del modelo y cuota justa = 1 / probabilidad)",
+           "- Goles: " + " | ".join(f"más de {line:g} {p(goals, 'Total de goles', f'Más de {line:g}')}"
+                                     for line in (1.5, 2.5, 3.5))]
+    for stat, model in counts.items():
+        fc = cc.forecast(model, pred.home, pred.away, pred.competition, pred.match_id, pred.neutral)
+        sels = markets.count_selections(fc, pred.home, pred.away)
+        spec, unit = cc.STATS[stat], fc.label.lower()
+        lines = [x for x in spec["total_lines"] if abs(x - (fc.league_home + fc.league_away)) <= 1.6]
+        more = "Quién saca más córners" if stat == "corners" else "Quién recibe más tarjetas"
+        out.append(f"- {fc.label}: esperados {fc.mu_total:.1f} ({pred.home} {fc.mu_home:.1f}, {pred.away} "
+                   f"{fc.mu_away:.1f}; partido medio {fc.league_home + fc.league_away:.1f})"
+                   + (" ⚠ pocos datos de algún equipo" if fc.low_data else ""))
+        out.append("    " + " | ".join(f"más de {x:g} {p(sels, f'Total de {unit}', f'Más de {x:g}')}" for x in lines))
+        out.append(f"    {more}: {pred.home} {p(sels, more, pred.home)} | iguales {p(sels, more, 'Iguales')} | "
+                   f"{pred.away} {p(sels, more, pred.away)}")
+        if model.validation is not None:
+            v = model.validation
+            out.append(f"    Validación ({v.n} partidos no vistos): más/menos de {v.line:g} acierta "
+                       f"{v.hits / v.n:.0%}; {more.lower()} acierta {v.more_hits / v.more_n:.0%}")
+    if not counts:
+        out.append("- Córners y tarjetas: ESPN no los publica para esta competición.")
+    return out
 
 
 def backtest_report(result) -> str:
@@ -223,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     except mm.PredictionError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
-    print(report(pred, data, args.detalle))
+    print(report(pred, data, args.detalle, cc.fit_all(data)))
     if args.backtest:
         try:
             print(backtest_report(backtest.run(model)))
