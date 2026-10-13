@@ -40,7 +40,7 @@ from src.match_model import (
 
 UNDERSTAT_SEASONS = 5  # temporadas anteriores a la actual (la más antigua es solo historial previo)
 ESPN_LEAGUE_YEARS = 4  # años naturales de una liga de ESPN (incluido el actual)
-ESPN_CUP_YEARS = 2  # años naturales del pool de una copa (muchas ligas: se limita la descarga)
+ESPN_CUP_YEARS = 3  # años naturales del pool de una copa (con 2, los partidos de copa predecían algo peor)
 ESPN_STATS_YEARS = 3  # años naturales de córners y tarjetas de ESPN en las ligas de Understat
 MAX_WORKERS = 8
 MIN_MAPPING_SIMILARITY = 0.85  # nombres ESPN ↔ Understat del mismo club (p. ej. "Leeds United" ↔ "Leeds")

@@ -316,7 +316,7 @@ def fit_ratings_arrays(h: np.ndarray, a: np.ndarray, hs: np.ndarray, as_: np.nda
             np.bincount(h, wt * ma * attack[a], n) + np.bincount(a, wt * mh * attack[h], n) + prior)
         if groups is not None:
             k = int(groups.max()) + 1
-            total = np.bincount(groups, games, k) + GROUP_PRIOR_MATCHES
+            total = np.maximum(np.bincount(groups, games, k) + GROUP_PRIOR_MATCHES, 1e-9)
             target_att = ((np.bincount(groups, games * attack, k) + GROUP_PRIOR_MATCHES) / total)[groups]
             target_def = ((np.bincount(groups, games * defense, k) + GROUP_PRIOR_MATCHES) / total)[groups]
     scale = np.average(attack, weights=games) if games.sum() > 0 else 1.0

@@ -482,9 +482,11 @@ la validación de la competición.
   ni tarjetas y Paraguay casi no publica córners.
 - **Copas internacionales** (Champions, Europa League, Conference League,
   Libertadores, Sudamericana, Concacaf Champions Cup): se modelan junto con
-  las ligas de sus participantes (20 ligas UEFA, 10 CONMEBOL, 5 CONCACAF),
-  así la fuerza de cada equipo sale sobre todo de su liga y los cruces entre
-  países calibran unas ligas frente a otras.
+  las ligas de sus participantes (20 ligas UEFA, 10 CONMEBOL, 5 CONCACAF;
+  3 años de ESPN), así la fuerza de cada equipo sale sobre todo de su liga y
+  los cruces entre países calibran unas ligas frente a otras. El suavizado de
+  cada equipo apunta a la media de **su** liga (no a la de todo el pool) y el
+  nivel de cada liga sale de esos cruces (ver "Copas contra el mercado").
 - **football-data.co.uk** (señal de mercado y backtest): resultados con
   cuotas de cierre de las ligas principales y sus segundas divisiones, y de
   Liga MX, MLS, Argentina, Brasil, Japón, Rusia, Grecia, Austria, Dinamarca,
@@ -688,6 +690,39 @@ Resultado en 7.325 partidos de las 21 competiciones:
   (−0.0006), acercamiento del total (Over/Under 0.6851 → 0.6802).
 
 Desde la terminal: `python3 modelo_prediccion.py "Arsenal" "Leeds" --backtest`.
+
+**Copas contra el mercado** (octubre de 2026). En las copas el modelo se
+alejaba mucho de las cuotas: el 13/10 daba Galatasaray–Barcelona 30/22/49
+(mercado 12/14/75), Inter–Brugge 51/23/26 (76/15/9) y Viking–Bayern 18/18/64
+(5/7/87). La causa: cada equipo arrancaba con 2 partidos "de media" de todo
+el pool, y con pocos cruces entre ligas ese suavizado achicaba la diferencia
+entre ellas (equivalía a sumarle a cada liga decenas de partidos contra un
+"equipo europeo medio").
+
+- **Cambio** (`src/match_model.py`): con varias ligas juntas, el suavizado
+  de cada equipo apunta a la media de su liga (la competición, sin copas,
+  en la que más jugó en los 12 meses; los equipos que solo juegan la copa
+  forman un grupo aparte), y el nivel de cada liga sale de los cruces, con
+  10 partidos "de media" para que una liga casi sin cruces no se dispare.
+  Además, las copas usan 3 años de ESPN en lugar de 2.
+- **Resultado** en partidos de copa que el modelo no había visto, con las
+  cuotas previas de ESPN (log loss 1X2; la distancia al mercado es la
+  diferencia con el log loss de las cuotas):
+
+  | Copas | Partidos | Antes | Ahora | Mercado | Distancia al mercado |
+  |---|---|---|---|---|---|
+  | Champions, Europa y Conference | 167 | 0.9733 | 0.9434 | 0.9234 | +0.050 → +0.020 |
+  | Libertadores y Sudamericana | 243 | 1.0020 | 0.9751 | 0.9315 | +0.070 → +0.044 |
+
+  El 13/10 quedaron Galatasaray–Barcelona 20/19/62, Inter–Brugge 66/18/16 y
+  Viking–Bayern 7/10/82.
+- **En las ligas no cambia nada:** solo las que tienen división inferior en el pool se mueven,
+  y en total quedan igual (−0.0002 ± 0.0003 en los 7.334 partidos del
+  backtest de 21 ligas).
+- **Probado y descartado:** 0, 30 o 100 partidos "de media" por liga (0 es inestable,
+  30 y 100 quedan más lejos del mercado), 1 o 4 partidos de suavizado por
+  equipo (1 igual, 4 peor) y estirar además la diferencia local/visitante
+  solo en copas (−0.002 y −0.001 de log loss, dentro del ruido).
 
 **Córners y tarjetas** (`src/corners_cards.py`, `src/markets.py`). Un modelo
 aparte del de goles, por equipo:
