@@ -59,7 +59,7 @@ PRIOR_MATCHES = 2.0  # suavizado: cada equipo arranca con 2 partidos "de media d
 # partidos "de media" para que una liga casi sin cruces no se dispare). Apuntar a la media global achicaba
 # la diferencia entre ligas: cada equipo sumaba partidos de "equipo europeo medio".
 LEAGUE_PRIOR = True
-GROUP_PRIOR_MATCHES = 30.0
+GROUP_PRIOR_MATCHES = 10.0
 DECAY_HALF_LIFE_DAYS: float | None = 120.0  # peso de los partidos de la ventana: se reduce a la mitad cada 120 días
 IPF_ITERATIONS = 25
 MAX_GOALS = 10
