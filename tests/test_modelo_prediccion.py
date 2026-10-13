@@ -203,6 +203,42 @@ def test_fit_ratings_recovers_multiplicative_strengths():
     assert list(np.argsort(ratings.defense[i])) == list(range(6))
 
 
+def _two_leagues(n_cross: int):
+    """Dos ligas de 6 equipos (todos contra todos, ida y vuelta) en las que la liga A genera el doble que la B,
+    con `n_cross` cruces entre ligas: arrays para fit_ratings_arrays y la liga de cada equipo."""
+    teams = [f"A{i}" for i in range(6)] + [f"B{i}" for i in range(6)]
+    level = {t: (2.0 if t.startswith("A") else 1.0) for t in teams}
+    pairs = [(h, a) for lg in "AB" for h in teams for a in teams if h != a and h[0] == a[0] == lg]
+    pairs += [(f"A{i % 6}", f"B{(i + 1) % 6}") if i % 2 == 0 else (f"B{i % 6}", f"A{(i + 1) % 6}") for i in range(n_cross)]
+    index = {t: i for i, t in enumerate(teams)}
+    h = np.array([index[x] for x, _ in pairs]); a = np.array([index[y] for _, y in pairs])
+    hs = np.array([1.4 * level[x] / level[y] for x, y in pairs]); as_ = np.array([1.1 * level[y] / level[x] for x, y in pairs])
+    groups = np.array([0] * 6 + [1] * 6)
+    return h, a, hs, as_, np.zeros(len(pairs), bool), index, groups
+
+
+def test_league_prior_keeps_the_gap_between_leagues():
+    h, a, hs, as_, neutral, index, groups = _two_leagues(n_cross=12)
+    flat = mm.fit_ratings_arrays(h, a, hs, as_, neutral, hs, as_, index)
+    by_league = mm.fit_ratings_arrays(h, a, hs, as_, neutral, hs, as_, index, groups=groups)
+
+    def gap(r):  # ataque medio de la liga A sobre el de la B (la verdad es 2)
+        return r.attack[:6].mean() / r.attack[6:].mean()
+
+    # Hacia la media global, el suavizado de cada equipo achica la diferencia; hacia la de su liga, no.
+    assert gap(flat) < gap(by_league) <= 2.0 + 1e-6
+    assert gap(by_league) > 1.9
+
+
+def test_team_leagues_ignores_cups_and_groups_teams_without_league():
+    # Equipos 0-1 en la liga 0, 2-3 en la liga 1, el 4 solo juega la copa (competición 2).
+    h = np.array([0, 2, 0, 4, 1])
+    a = np.array([1, 3, 2, 0, 3])
+    comp = np.array([0, 1, 2, 2, 2])
+    groups = mm.team_leagues(h, a, comp, 5, league_ids=np.array([0, 1]))
+    assert groups.tolist() == [0, 0, 1, 1, 2]
+
+
 def test_fit_ratings_survives_team_without_goals():
     rows = [{"home": "A", "away": "B", "hg": 0.0, "ag": 2.0}, {"home": "B", "away": "C", "hg": 1.0, "ag": 0.0},
             {"home": "C", "away": "A", "hg": 3.0, "ag": 0.0}]

@@ -414,8 +414,8 @@ def _next_kickoff(codes: tuple[str, ...], after: pd.Timestamp) -> pd.Timestamp |
 
 @st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
 def _competition_model(code: str) -> mm.LeagueModel:
-    """Descarga los datos de la competición (con córners y tarjetas) y ajusta el modelo de goles (lo caro:
-    una vez cada pocas horas)."""
+    """Descarga los datos de la competición (con córners y tarjetas) y ajusta el modelo de goles, con la fuerza
+    de cada equipo relativa a su liga (lo caro: una vez cada pocas horas)."""
     return mm.train_league(comps.load_competition(comps.BY_CODE[code]))
 
 

@@ -54,6 +54,12 @@ WINDOW_DAYS = 365  # ventana de la fuerza "de fondo" (ajustada por rival)
 MIN_WINDOW_MATCHES = 50  # partidos en la ventana necesarios para ajustar las fuerzas
 MIN_MATCHES = 5  # mínimo de partidos de cada equipo para usar un partido al entrenar
 PRIOR_MATCHES = 2.0  # suavizado: cada equipo arranca con 2 partidos "de media de la liga"
+# Con varias ligas juntas (copas con su pool, o la división inferior), el suavizado de cada equipo apunta a
+# la media de SU liga, y el nivel de cada liga sale de los cruces entre ligas (con GROUP_PRIOR_MATCHES
+# partidos "de media" para que una liga casi sin cruces no se dispare). Apuntar a la media global achicaba
+# la diferencia entre ligas: cada equipo sumaba partidos de "equipo europeo medio".
+LEAGUE_PRIOR = True
+GROUP_PRIOR_MATCHES = 10.0
 DECAY_HALF_LIFE_DAYS: float | None = 120.0  # peso de los partidos de la ventana: se reduce a la mitad cada 120 días
 IPF_ITERATIONS = 25
 MAX_GOALS = 10
@@ -203,11 +209,12 @@ class MatchIndex:
     también se ajusta la fuerza según el mercado (columnas h_mkt / a_mkt, sin NaN)."""
 
     def __init__(self, played: pd.DataFrame, has_signal: bool = True, focus: str | None = None,
-                 has_market: bool = False):
+                 has_market: bool = False, cups: frozenset = frozenset()):
         self.played = played.sort_values(["datetime", "id"]).reset_index(drop=True)
         self.has_signal = has_signal
         self.has_market = has_market
         self.focus = focus  # competición que se predice (cuenta los partidos "en la competición")
+        self.cups = cups  # competiciones que no definen la liga de un equipo
         self.teams = sorted(set(self.played["home"]) | set(self.played["away"]))
         self.team_id = {t: i for i, t in enumerate(self.teams)}
         p = self.played
@@ -219,6 +226,11 @@ class MatchIndex:
             "sig_h": p["h_sig"].to_numpy(float), "sig_a": p["a_sig"].to_numpy(float),
             "gls_h": p["hg"].to_numpy(float), "gls_a": p["ag"].to_numpy(float),
         }
+        self.competitions = sorted(p["competition"].unique()) if "competition" in p else []
+        comp_id = {c: i for i, c in enumerate(self.competitions)}
+        self.arrays["comp"] = (p["competition"].map(comp_id).to_numpy(int) if self.competitions
+                               else np.zeros(len(p), int))
+        self.league_ids = np.array([i for i, c in enumerate(self.competitions) if c not in cups], dtype=int)
         if has_market:
             self.arrays["mkt_h"], self.arrays["mkt_a"] = p["h_mkt"].to_numpy(float), p["a_mkt"].to_numpy(float)
         long = team_long_frame(p)
@@ -276,12 +288,13 @@ class LeagueRatings:
 
 def fit_ratings_arrays(h: np.ndarray, a: np.ndarray, hs: np.ndarray, as_: np.ndarray, neutral: np.ndarray,
                        hg: np.ndarray, ag: np.ndarray, index: dict[str, int],
-                       weights: np.ndarray | None = None) -> LeagueRatings:
+                       weights: np.ndarray | None = None, groups: np.ndarray | None = None) -> LeagueRatings:
     """Modelo multiplicativo señal = μ_sede · ataque · defensa_rival, ajustado por
     ajuste proporcional iterativo (máxima verosimilitud de Poisson sobre la
-    señal), con un suavizado de PRIOR_MATCHES partidos de media de la liga que
-    evita fuerzas extremas (o nulas) con pocos partidos. `h`/`a` son ids de
-    `index`; los equipos sin partidos en la ventana quedan en 1.0."""
+    señal), con un suavizado de PRIOR_MATCHES partidos de media que evita fuerzas
+    extremas (o nulas) con pocos partidos. `h`/`a` son ids de `index`.
+    Con `groups` (liga de cada equipo, ids 0..k), la media hacia la que se suaviza cada
+    equipo es la de su liga, que a su vez se acerca a 1 con GROUP_PRIOR_MATCHES partidos."""
     n = len(index)
     regular = ~neutral if (~neutral).any() else np.ones_like(neutral)
     mu_h, mu_a = hs[regular].mean(), as_[regular].mean()
@@ -291,14 +304,22 @@ def fit_ratings_arrays(h: np.ndarray, a: np.ndarray, hs: np.ndarray, as_: np.nda
 
     wt = np.ones(len(h)) if weights is None else weights  # peso de cada partido (decaimiento temporal)
     prior = PRIOR_MATCHES * mid
-    sig_for = np.bincount(h, wt * hs, n) + np.bincount(a, wt * as_, n) + prior
-    sig_against = np.bincount(h, wt * as_, n) + np.bincount(a, wt * hs, n) + prior
-    attack, defense = np.ones(n), np.ones(n)
-    for _ in range(IPF_ITERATIONS):
-        attack = sig_for / (np.bincount(h, wt * mh * defense[a], n) + np.bincount(a, wt * ma * defense[h], n) + prior)
-        defense = sig_against / (np.bincount(h, wt * ma * attack[a], n) + np.bincount(a, wt * mh * attack[h], n) + prior)
+    sig_for = np.bincount(h, wt * hs, n) + np.bincount(a, wt * as_, n)
+    sig_against = np.bincount(h, wt * as_, n) + np.bincount(a, wt * hs, n)
     games = np.bincount(h, wt, n) + np.bincount(a, wt, n)
-    scale = np.average(attack, weights=games)
+    attack, defense = np.ones(n), np.ones(n)
+    target_att = target_def = 1.0
+    for _ in range(IPF_ITERATIONS):
+        attack = (sig_for + prior * target_att) / (
+            np.bincount(h, wt * mh * defense[a], n) + np.bincount(a, wt * ma * defense[h], n) + prior)
+        defense = (sig_against + prior * target_def) / (
+            np.bincount(h, wt * ma * attack[a], n) + np.bincount(a, wt * mh * attack[h], n) + prior)
+        if groups is not None:
+            k = int(groups.max()) + 1
+            total = np.maximum(np.bincount(groups, games, k) + GROUP_PRIOR_MATCHES, 1e-9)
+            target_att = ((np.bincount(groups, games * attack, k) + GROUP_PRIOR_MATCHES) / total)[groups]
+            target_def = ((np.bincount(groups, games * defense, k) + GROUP_PRIOR_MATCHES) / total)[groups]
+    scale = np.average(attack, weights=games) if games.sum() > 0 else 1.0
     return LeagueRatings(index, float(mu_h), float(mu_a), float(hg[regular].mean()), float(ag[regular].mean()),
                          attack / scale, defense * scale)
 
@@ -366,6 +387,19 @@ def team_snapshot(index: MatchIndex, team: str, venue: str, cutoff: pd.Timestamp
     return snap
 
 
+def team_leagues(h: np.ndarray, a: np.ndarray, comp: np.ndarray, n_teams: int, league_ids: np.ndarray) -> np.ndarray:
+    """Liga de cada equipo en la ventana: la competición (sin copas) en la que más jugó. Los equipos que
+    solo jugaron copas (ligas fuera del pool) forman un grupo aparte."""
+    n_comp = int(comp.max()) + 1 if len(comp) else 1
+    counts = np.zeros((n_teams, n_comp))
+    np.add.at(counts, (h, comp), 1)
+    np.add.at(counts, (a, comp), 1)
+    leagues = counts[:, league_ids] if len(league_ids) else np.zeros((n_teams, 0))
+    group = leagues.argmax(axis=1) if leagues.shape[1] else np.zeros(n_teams, int)
+    others = leagues.sum(axis=1) == 0 if leagues.shape[1] else np.ones(n_teams, bool)
+    return np.where(others, max(leagues.shape[1], 1), group)
+
+
 def window_ratings(index: MatchIndex, cutoff: pd.Timestamp, cache: dict) -> dict[str, LeagueRatings] | None:
     """Fuerzas de todos los equipos con los partidos de los 12 meses anteriores al
     día de `cutoff` (se recalculan una vez por día: los partidos del mismo día no entran)."""
@@ -381,7 +415,10 @@ def window_ratings(index: MatchIndex, cutoff: pd.Timestamp, cache: dict) -> dict
             if DECAY_HALF_LIFE_DAYS:
                 age = (day.to_datetime64() - index.times[w]) / np.timedelta64(1, "D")
                 weights = 0.5 ** (age / DECAY_HALF_LIFE_DAYS)
-            rest = (arr["neutral"], arr["gls_h"], arr["gls_a"], index.team_id, weights)
+            groups = None
+            if LEAGUE_PRIOR and len(index.competitions) > 1:
+                groups = team_leagues(arr["h"], arr["a"], arr["comp"], len(index.team_id), index.league_ids)
+            rest = (arr["neutral"], arr["gls_h"], arr["gls_a"], index.team_id, weights, groups)
             sig = fit_ratings_arrays(*common, arr["sig_h"], arr["sig_a"], *rest)
             gls = fit_ratings_arrays(*common, arr["gls_h"], arr["gls_a"], *rest) if index.has_signal else sig
             cache[day] = {"sig": sig, "gls": gls}
@@ -881,7 +918,7 @@ def build_league_data(competition: str, name: str, matches: pd.DataFrame, source
             usable["h_mkt"] = usable["h_mkt"].where(with_market, usable["h_sig"] * scale)
             usable["a_mkt"] = usable["a_mkt"].where(with_market, usable["a_sig"] * scale)
     index = MatchIndex(usable, has_signal, focus=competition if train_on_focus else None,
-                       has_market=market_mode is not None)
+                       has_market=market_mode is not None, cups=kappa_exclude)
     return LeagueData(competition, name, matches, index, sources, signal_name, training_since, train_on_focus,
                       kappa_exclude, market_mode, coverage)
 
