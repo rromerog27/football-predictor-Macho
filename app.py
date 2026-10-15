@@ -24,7 +24,7 @@ import streamlit as st
 for _name in ("src.utils", "src.fc27_market", "src.fc27_history", "src.fc27_signals", "src.match_model",
               "src.understat_source", "src.espn_source", "src.football_data_source", "src.market_signal",
               "src.lineups", "src.competitions", "src.backtest", "src.performance", "src.corners_cards",
-              "src.markets", "src.ui_theme"):
+              "src.markets", "src.market_picks", "src.ui_theme"):
     _module = sys.modules.get(_name)
     if _module is not None and os.path.getmtime(_module.__file__) > getattr(_module, "_loaded_at", 0):
         importlib.reload(_module)

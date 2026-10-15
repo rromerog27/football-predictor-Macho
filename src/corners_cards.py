@@ -84,6 +84,10 @@ class CountModel:
     beta_total: float  # lo mismo en el total del partido
     pre: dict[str, tuple[float, float, float, float]] = field(repr=False)  # id -> (esp. local, esp. visit., pesos)
     validation: Validation | None
+    # Partidos de validación (predicción previa, medias de la liga y lo que pasó) y los parámetros ajustados
+    # solo con el entrenamiento, para medir reglas de picks sin mirar esos partidos.
+    val_rows: pd.DataFrame | None = field(default=None, repr=False)
+    val_params: dict | None = field(default=None, repr=False)
 
     @property
     def label(self) -> str:
@@ -271,15 +275,35 @@ def fit(data: LeagueData, stat: str) -> CountModel | None:
         return {"beta_team": beta_team, "k_team": k_team, "beta_total": beta_total, "k_total": k_total,
                 "k_league": fit_dispersion(total, league_total)}
 
-    validation = None
+    validation = val_rows = val_params = None
     if len(train) >= 100:
         line = main_line(float((train["hv"] + train["av"]).mean()))
-        validation = _validate(pre, data.competition, cutoff_idx, fit_params(train), line)
+        val_params = fit_params(train)
+        validation = _validate(pre, data.competition, cutoff_idx, val_params, line)
+        val = pre.iloc[cutoff_idx:]
+        val_rows = val[(val["competition"] == data.competition) & (val["wh"] >= MIN_TEAM_WEIGHT)
+                       & (val["wa"] >= MIN_TEAM_WEIGHT)].merge(
+            rows[["id", "datetime", "home", "away"]], on="id", how="left").reset_index(drop=True)
     final = fit_params(pre[reliable]) if reliable.sum() >= 100 else {
         "beta_team": 0.5, "k_team": float(K_GRID[-1]), "beta_total": 0.5, "k_total": float(K_GRID[-1])}
     pre_map = {r.id: (r.mh, r.ma, r.wh, r.wa) for r in pre.itertuples(index=False)}
     return CountModel(stat, data.competition, state, league, final["k_team"], final["k_total"],
-                      final["beta_team"], final["beta_total"], pre_map, validation)
+                      final["beta_team"], final["beta_total"], pre_map, validation, val_rows, val_params)
+
+
+def validation_forecasts(model: CountModel) -> list[tuple[pd.Series, CountForecast]]:
+    """Cada partido de validación con la predicción que se hacía antes de jugarlo (parámetros del
+    entrenamiento, sin mirar la validación)."""
+    if model.val_rows is None or model.val_params is None:
+        return []
+    vp = model.val_params
+    out = []
+    for r in model.val_rows.itertuples(index=False):
+        fc = CountForecast(model.stat, float(shrink(r.mh, r.lh, vp["beta_team"])), float(shrink(r.ma, r.la, vp["beta_team"])),
+                           float(r.lh), float(r.la), vp["k_team"], vp["k_total"], False,
+                           float(shrink(r.mh + r.ma, r.lh + r.la, vp["beta_total"])))
+        out.append((pd.Series(r._asdict()), fc))
+    return out
 
 
 def fit_all(data: LeagueData) -> dict[str, CountModel]:
