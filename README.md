@@ -190,6 +190,7 @@ football_predictor/
 │   ├── performance.py          # Aciertos, calibración, historial y regla de los picks (pestañas Picks y Rendimiento)
 │   ├── corners_cards.py        # Modelo por equipo de córners y tarjetas (binomial negativa) y su validación
 │   ├── markets.py              # Mercados de goles, córners y tarjetas: probabilidad, cuota justa y aciertos
+│   ├── market_picks.py         # Picks de mercados por niveles, su historial y los parlays del día
 │   ├── ui_theme.py             # Botón de modo claro/oscuro y colores de los componentes propios
 │   ├── visualizations.py       # Construcción de gráficos Plotly
 │   └── utils.py                 # Utilidades comunes (safe_divide, logging, formateo)
@@ -203,6 +204,7 @@ football_predictor/
     ├── test_fc27.py            # Pruebas de la sección FC 27 Mercado (lectura, historial, señales)
     ├── test_performance.py     # Pruebas de aciertos, calibración, historial y regla de los picks
     ├── test_markets.py         # Pruebas de córners y tarjetas (ESPN, modelo) y de los mercados de un partido
+    ├── test_market_picks.py    # Pruebas de la regla de picks de mercados, su historial y los parlays
     └── test_modelo_prediccion.py # Pruebas sin red del modelo, sus fuentes (Understat, ESPN) y el script
 ```
 
@@ -221,7 +223,7 @@ football_predictor/
 | `src/prediction_model.py` | Entrena y calibra la regresión logística de respaldo, calcula sus métricas de validación, y combina sus probabilidades con las de Poisson ponderando por desempeño de validación (log loss). |
 | `src/report_generator.py` | Exporta a CSV/Excel/HTML lo que ya calcularon los demás módulos: tabla de estadísticas, predicción de un partido, comparación de equipos, matriz de marcadores y el reporte HTML completo. |
 | `src/market_odds.py` | Convierte cuotas 1X2 a probabilidad implícita (quitando el margen de la casa), evalúa qué tan bien predice el mercado los partidos de prueba, y simula en retrospectiva una estrategia de apuestas de valor comparando el modelo contra el mercado. |
-| `views/partidos_del_dia.py` | Página Partidos del día, con cinco pestañas: los partidos de la fecha (en la zona horaria del navegador) con la predicción y el mercado de cada uno, los picks del día, los mercados de goles, córners y tarjetas, "Analizar" un partido y el rendimiento del modelo. Solo presenta: el modelo vive en `src/match_model.py` y `src/corners_cards.py`, y las cuentas en `src/performance.py` y `src/markets.py`. |
+| `views/partidos_del_dia.py` | Página Partidos del día, con cinco pestañas: los partidos de la fecha (en la zona horaria del navegador) con la predicción y el mercado de cada uno, los picks del día (resultado, otros mercados y parlays), los mercados de goles, córners y tarjetas, "Analizar" un partido y el rendimiento del modelo. Solo presenta: el modelo vive en `src/match_model.py` y `src/corners_cards.py`, y las cuentas en `src/performance.py`, `src/markets.py` y `src/market_picks.py`. |
 | `src/match_model.py` | Modelo independiente de la fuente: fuerza ajustada por rival (señal y goles), Poisson con Dixon-Coles, validación y predicción de un partido (con las probabilidades del mercado si hay cuotas). |
 | `src/competitions.py` | Registro de las 33 ligas y copas (fuente, región, pool de ligas de las copas), carga de sus datos, partidos del día y cruce de cuotas de ESPN con los partidos de Understat. |
 | `src/understat_source.py` | Descarga y caché del xG de Understat, convertido a las columnas estándar del modelo. |
@@ -230,6 +232,7 @@ football_predictor/
 | `src/lineups.py` | Lee los titulares de ESPN (~1 h antes del partido), mide cuánto rota cada equipo respecto a sus 10 partidos anteriores y ajusta el 1X2 final. |
 | `src/performance.py` | Funciones puras sobre las predicciones de validación y el backtest: aciertos del modelo y del mercado, favoritos claros, calibración por tramos, historial y la regla de los picks (y de los partidos a evitar). |
 | `src/corners_cards.py` | Modelo de córners y tarjetas por equipo: tasas a favor y en contra relativas a la media de cada competición, acercamiento a la media de la liga y binomial negativa, con la validación (línea principal y quién tiene más). |
+| `src/market_picks.py` | Regla de picks de goles, córners y tarjetas por niveles (fijo, intermedio, arriesgado), su prueba con los partidos de validación, y los parlays del día con su simulación histórica. |
 | `src/markets.py` | Mercados de un partido (goles desde la matriz de marcadores; córners y tarjetas desde `src/corners_cards.py`) con probabilidad, cuota justa y partido medio, los destacados del día y los aciertos de cada mercado. |
 | `src/backtest.py` | Cruza las predicciones de validación con las cuotas de cierre (football-data.co.uk o ESPN) y compara log loss, mezcla modelo + mercado, Over/Under y ROI simulado. |
 | `src/espn_source.py` | Descarga y caché del marcador de ESPN (resultados, tiros, córners, tarjetas, calendario, campo neutral, cuotas de DraftKings) y cálculo del xG aproximado con tiros. |
@@ -383,7 +386,9 @@ internacionales y Japón). Tiene cinco pestañas:
   - En partidos ya jugados muestra el resultado y si el pronóstico acertó.
     Si no hay partidos ese día, ofrece saltar a la próxima fecha con
     partidos. `?fecha=AAAA-MM-DD` en la URL abre la página en ese día.
-- **Picks:** con la misma fecha, buscador y ligas, los partidos en los que el
+- **Picks**, en tres partes con la misma fecha, buscador y ligas:
+  **Resultado**, **Otros mercados** y **Parlays**.
+  - **Resultado:** los partidos en los que el
   modelo ve un favorito claro (65% o más) y no le da menos que el mercado,
   ordenados por valor (probabilidad del modelo × cuota − 1), con la cuota y
   lo que da el mercado. Debajo, **Para evitar**: favoritos claros del mercado
@@ -392,6 +397,21 @@ internacionales y Japón). Tiene cinco pestañas:
   el backtest la regla dio 753 picks y ganó el 74%, pero a cuota de cierre
   quedó en empate (ROI +0.8%): son favoritos que suelen ganar, no una fuente
   de ganancias. **No es una recomendación de apuesta.**
+  - **Otros mercados:** picks de goles (más/menos, ambos anotan, goles de
+    cada equipo, doble oportunidad, ganar por 2 o más), córners y tarjetas
+    en tres niveles: **fijos** (90% o más), **intermedios** (80–90%) y
+    **arriesgados** (65–80%). Solo entran los que el modelo ve al menos 10
+    puntos (15 en los arriesgados) por encima de un partido medio de la
+    competición, uno por partido, familia y nivel, y no se dan picks de un
+    partido en el que el favorito del modelo y el de la casa no coinciden o
+    se separan más de 15 puntos. Cada pick muestra la probabilidad, lo
+    normal, la cuota justa y cuánto acertó su nivel en partidos ya jugados;
+    abajo, la tabla por nivel y familia y los picks de los últimos 30 días.
+  - **Parlays:** fija, intermedia y arriesgada del día, armadas con esos
+    picks (una pata por partido, las más probables de su nivel: hasta 4 en la
+    fija y 5 en las otras). Muestra la probabilidad del parlay según el
+    modelo, la cuota justa y cuántas veces habría salido cada uno en los días
+    de validación.
 - **Mercados:** goles, córners y tarjetas de los partidos del día, con la
   probabilidad del modelo y la **cuota justa** (1 ÷ probabilidad: si una casa
   paga más, el modelo ve valor). Arriba, **Lo más claro del día**: por
@@ -690,6 +710,26 @@ Resultado en 7.325 partidos de las 21 competiciones:
   (−0.0006), acercamiento del total (Over/Under 0.6851 → 0.6802).
 
 Desde la terminal: `python3 modelo_prediccion.py "Arsenal" "Leeds" --backtest`.
+
+**Picks de goles, córners y tarjetas** (`src/market_picks.py`). La regla de
+la pestaña Picks → Otros mercados, aplicada a los partidos de validación de
+las 33 competiciones (cada uno predicho solo con los anteriores; goles con el
+modelo de goles, córners y tarjetas con su predicción previa y los parámetros
+del entrenamiento):
+
+| Nivel | Goles | Córners | Tarjetas |
+|---|---|---|---|
+| Fijo (90% o más) | 706 de 754: 94% (decía 93%) | 11 de 11 | 18 de 20: 90% (decía 92%) |
+| Intermedio (80–90%) | 2.116 de 2.498: 85% (85%) | 363 de 437: 83% (83%) | 151 de 184: 82% (84%) |
+| Arriesgado (65–80%) | 1.260 de 1.704: 74% (73%) | 646 de 861: 75% (72%) | 82 de 121: 68% (71%) |
+
+Los parlays armados cada día de la validación con la misma regla salieron:
+la fija 128 de 156 días (82%; el modelo decía 80%, 3.3 patas de media), la
+intermedia 156 de 292 (53%; decía 55%, 4.1 patas) y la arriesgada 92 de 271
+(34%; decía 33%, 4.0 patas). O sea, la regla acierta lo que dice. **No se
+mide la ganancia:** no hay cuotas históricas de córners, tarjetas ni ambos
+anotan en las fuentes (solo de más/menos 2.5 goles), y las casas pagan menos
+que la cuota justa por su margen.
 
 **Copas contra el mercado** (octubre de 2026). En las copas el modelo se
 alejaba mucho de las cuotas: el 13/10 daba Galatasaray–Barcelona 30/22/49

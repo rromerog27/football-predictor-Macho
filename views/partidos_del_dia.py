@@ -34,6 +34,7 @@ from src import football_data_source as fd
 from src import lineups
 from src import match_model as mm
 from src import corners_cards as cc
+from src import market_picks as mp
 from src import markets
 from src import performance as perf
 
@@ -57,6 +58,7 @@ MONTHS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agost
 HIGHLIGHTS = ["Más claros", "Más parejos", "Vs mercado", "XI confirmados"]
 SORTS = ["Hora", "Liga", "Más claros"]
 VIEWS = ["Partidos", "Picks", "Mercados", "Analizar", "Rendimiento"]
+PICK_VIEWS = ["Resultado", "Otros mercados", "Parlays"]
 # La regla de los picks en el backtest de 29 competiciones (8.846 partidos con cuotas de cierre, octubre de 2026):
 # (picks, proporción que ganó, ROI a cuota de cierre). Ver README.
 PICKS_BACKTEST = (753, 0.737, 0.008)
@@ -214,6 +216,29 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
   font-variant-numeric: tabular-nums; color: var(--fc-text); }
 .pd-mk-row .p small { display: block; font-size: .68rem; font-weight: 600; color: var(--fc-faint); }
 
+/* -- Parlays: patas con hora, partido y probabilidad; pie con el total -- */
+.pd-parlays { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 6px; }
+.pd-parlay { background: var(--fc-surface); border: 1px solid var(--fc-border); border-radius: var(--fc-radius);
+  box-shadow: var(--fc-shadow); min-width: 0; display: flex; flex-direction: column; }
+.pd-parlay-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 12px 14px 8px; }
+.pd-parlay-head b { font-size: 1rem; font-weight: 800; color: var(--fc-text); }
+.pd-parlay-head span { font-size: .72rem; color: var(--fc-muted); }
+.pd-parlay-leg { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 2px 10px; align-items: center;
+  padding: 8px 14px; border-top: 1px solid var(--fc-border); }
+.pd-parlay-leg .t { font-size: .72rem; color: var(--fc-muted); font-variant-numeric: tabular-nums; grid-row: 1 / span 2; }
+.pd-parlay-leg .what { font-size: .84rem; font-weight: 700; color: var(--fc-text); min-width: 0; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.pd-parlay-leg .match { grid-column: 2; font-size: .72rem; color: var(--fc-muted); min-width: 0; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.pd-parlay-leg .p { grid-column: 3; grid-row: 1 / span 2; font-weight: 800; font-size: .92rem; color: var(--fc-text);
+  font-variant-numeric: tabular-nums; text-align: right; }
+.pd-parlay-foot { margin-top: auto; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;
+  border-top: 1px solid var(--fc-border); padding: 10px 14px 12px; background: var(--fc-surface-2);
+  border-radius: 0 0 var(--fc-radius) var(--fc-radius); }
+.pd-parlay-foot span { display: block; font-size: .64rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--fc-faint); }
+.pd-parlay-foot b { font-size: .98rem; font-weight: 800; color: var(--fc-text); font-variant-numeric: tabular-nums; }
+
 /* -- Analizar: escudos grandes, cara a cara, últimos partidos e historial entre ellos -- */
 .pd-crest.lg { width: 32px; height: 32px; }
 .pd-crest.lg::before, span.pd-crest.lg { font-size: .7rem; }
@@ -358,7 +383,7 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
   .pd-rec-row .pd-hist-date { font-size: .72rem; }
   .st-key-pd_view button { padding-left: 7px; padding-right: 7px; }
   .st-key-pd_view button p { font-size: .78rem; }
-  .pd-mk-grid, .pd-mk-hl { grid-template-columns: minmax(0, 1fr); }
+  .pd-mk-grid, .pd-mk-hl, .pd-parlays { grid-template-columns: minmax(0, 1fr); }
   .pd-cols { display: none; }
   .pd-row > summary { grid-template-columns: 48px minmax(0, 1fr) 96px; grid-template-areas:
       "time teams pick" "probs probs over"; gap: 8px 10px; padding: 10px 12px; }
@@ -1158,15 +1183,36 @@ def _record_html(record: pd.DataFrame, tz: str) -> str:
 
 
 def section_picks(tz: str) -> None:
-    n_bt, won_bt, roi_bt = PICKS_BACKTEST
-    st.markdown(
-        f"<div class='pd-note'><b>Pick:</b> favorito del modelo con {perf.FAVORITE_MIN:.0%} o más, sin que el mercado "
-        f"le dé más. <b>No es una recomendación de apuesta:</b> en el backtest ({n_bt} picks) ganaron el {won_bt:.0%}, "
-        f"pero a cuota de cierre quedaron en empate (ROI {roi_bt:+.1%}). Revisá las alineaciones ~1 h antes.</div>",
-        unsafe_allow_html=True)
+    kind = st.segmented_control("Tipo de pick", PICK_VIEWS, default="Resultado", key="pd_pick_kind", required=True,
+                                label_visibility="collapsed")
+    if kind == "Resultado":
+        n_bt, won_bt, roi_bt = PICKS_BACKTEST
+        note = (f"<b>Pick:</b> favorito del modelo con {perf.FAVORITE_MIN:.0%} o más, sin que el mercado le dé más. "
+                f"<b>No es una recomendación de apuesta:</b> en el backtest ({n_bt} picks) ganaron el {won_bt:.0%}, "
+                f"pero a cuota de cierre quedaron en empate (ROI {roi_bt:+.1%}). Revisá las alineaciones ~1 h antes.")
+    elif kind == "Otros mercados":
+        note = ("<b>Picks de goles, córners y tarjetas</b> en tres niveles: <b>fijos</b> (90% o más), <b>intermedios</b> "
+                "(80–90%) y <b>arriesgados</b> (65–80%, con 15 puntos sobre lo normal). Solo entran los que el modelo ve "
+                "al menos 10 puntos por encima de un partido medio de la competición, uno por partido, familia y nivel. "
+                "Se dejan afuera los partidos en que el modelo se separa de la casa en quién es favorito. "
+                "<b>No es una recomendación de apuesta.</b>")
+    else:
+        note = ("<b>Parlays del día</b> armados con los picks de goles, córners y tarjetas: una pata por partido, las más "
+                "probables de cada nivel. La probabilidad del parlay es el producto de las patas. Abajo, cuántas veces "
+                "habría salido cada parlay en los días de validación. <b>No es una recomendación de apuesta.</b>")
+    st.markdown(f"<div class='pd-note'>{note}</div>", unsafe_allow_html=True)
     ctx = _day_context(tz)
     if ctx is None:
         return
+    if kind == "Otros mercados":
+        _picks_markets(ctx, tz)
+    elif kind == "Parlays":
+        _picks_parlays(ctx, tz)
+    else:
+        _picks_result(ctx, tz)
+
+
+def _picks_result(ctx: DayContext, tz: str) -> None:
     items = [it for it in ctx.items if _matches_query(it.row, ctx.query)]
     picks, avoid, no_odds = [], [], 0
     for it in items:
@@ -1222,6 +1268,209 @@ def section_picks(tz: str) -> None:
                         f"({record['won'].mean():.0%}) · {profit:+.1f} unidades apostando 1 a cada uno "
                         f"(ROI {profit / len(record):+.1%})</div>", unsafe_allow_html=True)
             st.markdown(_record_html(record.head(40), tz), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Picks de goles, córners y tarjetas, y parlays del día
+# ---------------------------------------------------------------------------
+
+
+@st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
+def _market_history(code: str) -> list[mp.MarketPick]:
+    """Picks que la regla habría dado en los partidos de validación de la competición, con su resultado."""
+    model = _competition_model(code)
+    val = model.trained.val_predictions
+    focus = val[val["competition"] == code]
+    picks = mp.goal_history(focus if len(focus) >= 30 else val, model.trained.rho)
+    for count_model in _count_models_or_none(code).values():
+        picks += mp.count_history(count_model)
+    return picks
+
+
+def _histories(codes: list[str]) -> list[mp.MarketPick]:
+    out, bar = [], st.progress(0.0, text="Probando la regla en partidos ya jugados…") if len(codes) > 1 else None
+    for n, code in enumerate(codes, start=1):
+        if bar:
+            bar.progress(n / len(codes), text=f"Probando la regla: {comps.BY_CODE[code].name} ({n}/{len(codes)})…")
+        try:
+            out += _market_history(code)
+        except Exception:  # noqa: BLE001 — sin historial de una competición, el resto sigue
+            continue
+    if bar:
+        bar.empty()
+    return out
+
+
+def _actual(item: DayItem, family: str) -> tuple[float, float] | None:
+    """Goles, córners o tarjetas reales de un partido ya jugado (None si no se jugó o no hay dato)."""
+    pred = item.pred
+    if pred is None or pred.final_score is None:
+        return None
+    if family == "Goles":
+        return float(pred.final_score[0]), float(pred.final_score[1])
+    cols = {"Córners": ("h_corners", "a_corners"), "Tarjetas": ("h_cards", "a_cards")}[family]
+    vals = [pd.to_numeric(item.row.get(c), errors="coerce") for c in cols]
+    return (float(vals[0]), float(vals[1])) if all(pd.notna(v) for v in vals) else None
+
+
+def _day_market_picks(ctx: DayContext) -> tuple[list[mp.MarketPick], int]:
+    """Picks de goles, córners y tarjetas del día y cuántos partidos se dejaron afuera por separarse de la casa."""
+    picks, skipped = [], 0
+    for it in ctx.items:
+        pred = it.pred
+        if pred is None or not _matches_query(it.row, ctx.query):
+            continue
+        if pred.market and mp.market_disagrees(pred.p_final, np.asarray(pred.market["p_1x2"], float)):
+            skipped += 1
+            continue
+        groups, forecasts = _match_markets(it.code, pred)
+        low = {fc.label for fc in forecasts.values() if fc.low_data}
+        sels = [s for fam, group in groups.items() if fam not in low for s in group]
+        for tier, sel in mp.match_picks(sels):
+            actual = _actual(it, sel.family)
+            hit = mp.selection_hit(sel, *actual, pred.home, pred.away) if actual is not None else None
+            picks.append(mp.MarketPick(it.key, it.row["datetime"], it.code, pred.home, pred.away, tier, sel, hit))
+    return picks, skipped
+
+
+def _rate(df: pd.DataFrame, tier: str, family: str | None = None) -> tuple[int, int, float] | None:
+    g = df[(df["tier"] == tier) & ((df["family"] == family) if family else True)]
+    n = int(g["n"].sum())
+    return (int(g["hits"].sum()), n, float((g["mean_p"] * g["n"]).sum() / n)) if n else None
+
+
+def _hit_chip(hit: bool | None) -> str:
+    if hit is None:
+        return ""
+    return "<span class='pd-pill ok'>✓ Salió</span>" if hit else "<span class='pd-pill miss'>✗ No salió</span>"
+
+
+def _market_pick_cards(picks: list[mp.MarketPick], items: dict[str, DayItem], hist: pd.DataFrame, tz: str) -> str:
+    cards = []
+    for pk in picks:
+        it = items[pk.key]
+        teams = "".join(f"<div class='pd-hl-team'>{_crest(tid, name)}<span>{_esc(name)}</span></div>"
+                        for name, tid in ((it.row["home"], it.home_id), (it.row["away"], it.away_id)))
+        rate = _rate(hist, pk.tier, pk.sel.family)
+        rate_html = f"{rate[0] / rate[1]:.0%}" if rate else "—"
+        rate_title = (f"Picks de {pk.sel.family.lower()} de este nivel en partidos ya jugados: salieron {rate[0]} de "
+                      f"{rate[1]} (el modelo decía {rate[2]:.0%})" if rate else "Sin historial")
+        cards.append(
+            "<div class='pd-pick-card'>"
+            f"<div class='pd-pick-head'><span class='pd-hl-top'>{_local(pk.kickoff, tz):%H:%M} · "
+            f"{_esc(comps.BY_CODE[pk.competition].name)} · {_esc(pk.sel.family)}</span>{_hit_chip(pk.hit)}</div>"
+            f"<div class='pd-hl-teams'>{teams}</div>"
+            f"<div class='pd-pick-what' title='{_esc(pk.sel.text)}'>{_esc(pk.sel.text)}</div>"
+            "<div class='pd-pick-grid'>"
+            f"<div><span>Modelo</span><b>{pk.sel.p:.0%}</b></div>"
+            f"<div><span title='En un partido medio de la competición'>Normal</span><b>{pk.sel.base:.0%}</b></div>"
+            f"<div><span>Cuota justa</span><b>{pk.sel.fair_odds:.2f}</b></div>"
+            f"<div><span title='{_esc(rate_title)}'>Histórico</span><b>{rate_html}</b></div>"
+            "</div></div>")
+    return f"<div class='pd-picks'>{''.join(cards)}</div>"
+
+
+def _market_summary_html(hist: pd.DataFrame) -> str:
+    head = "<tr><th>Nivel</th><th>Familia</th><th>Picks</th><th>Salieron</th><th>El modelo decía</th></tr>"
+    rows = [f"<tr><td>{_esc(r.tier)}</td><td>{_esc(r.family)}</td><td>{r.n:,}</td><td>{r.hits / r.n:.0%}</td>"
+            f"<td>{r.mean_p:.0%}</td></tr>".replace(",", ".") for r in hist.itertuples() if r.n]
+    return f"<div class='pd-card'><table class='pd-mini'>{head}{''.join(rows)}</table></div>"
+
+
+def _market_record_html(picks: list[mp.MarketPick], tz: str) -> str:
+    rows = []
+    for pk in picks:
+        rows.append(
+            f"<div class='pd-hist-row'><span class='pd-hist-date'>{_short_date(pk.kickoff, tz)}</span>"
+            f"<span class='pd-hist-match'>{_esc(pk.home)} – {_esc(pk.away)}</span>"
+            f"<span class='pd-hist-pick'><span class='pd-pill'>{_esc(pk.tier)} · {_esc(pk.sel.text)} · "
+            f"{pk.sel.p:.0%}</span></span><span class='pd-hist-res'>{_hit_chip(pk.hit)}</span></div>")
+    return f"<div class='pd-hist'>{''.join(rows)}</div>"
+
+
+def _picks_markets(ctx: DayContext, tz: str) -> None:
+    with st.spinner("Calculando goles, córners y tarjetas…"):
+        picks, skipped = _day_market_picks(ctx)
+    codes = sorted(ctx.models, key=ORDERED_CODES.index)
+    history = _histories(codes)
+    hist = mp.summary(history)
+    counts = {t: sum(p.tier == t for p in picks) for t in mp.TIER_NAMES}
+    _day_summary(ctx, tz, f" · {sum(counts.values())} picks" + (
+        f" · {skipped} partido{'s' if skipped != 1 else ''} sin picks porque el modelo se separa de la casa"
+        if skipped else ""))
+    items = {it.key: it for it in ctx.items}
+    notes = {"Fijo": "90% o más", "Intermedio": "80–90%", "Arriesgado": "65–80%"}
+    for tier in mp.TIER_NAMES:
+        tier_picks = sorted((p for p in picks if p.tier == tier), key=lambda p: (-p.sel.p, p.kickoff))
+        rate = _rate(hist, tier)
+        extra = f" · en partidos ya jugados salieron {rate[0] / rate[1]:.0%} (decía {rate[2]:.0%})" if rate else ""
+        _section_title(f"{tier}s ({len(tier_picks)})", notes[tier] + extra)
+        if tier_picks:
+            st.markdown(_market_pick_cards(tier_picks, items, hist, tz), unsafe_allow_html=True)
+        else:
+            st.markdown("<div class='pd-empty'>Ningún pick de este nivel en este día.</div>", unsafe_allow_html=True)
+
+    _section_title("Cómo les fue", f"Partidos que el modelo no había visto, de las {len(codes)} competiciones del día")
+    if len(hist):
+        st.markdown(_market_summary_html(hist), unsafe_allow_html=True)
+    if history and st.button("Ver los picks de los últimos 30 días", icon=":material/history:", key="pd_mk_record"):
+        last = max(p.kickoff for p in history)
+        recent = sorted((p for p in history if p.kickoff >= last - pd.Timedelta(days=30)), key=lambda p: p.kickoff,
+                        reverse=True)
+        won = sum(bool(p.hit) for p in recent)
+        st.markdown(f"<div class='pd-summary'>Salieron <b>{won} de {len(recent)}</b> ({won / max(len(recent), 1):.0%}) "
+                    "en los últimos 30 días con datos</div>", unsafe_allow_html=True)
+        st.markdown(_market_record_html(recent[:60], tz), unsafe_allow_html=True)
+
+
+def _parlay_html(parlay: mp.Parlay, sim: pd.DataFrame, tz: str) -> str:
+    legs = "".join(
+        f"<div class='pd-parlay-leg'><span class='t'>{_local(leg.kickoff, tz):%H:%M}</span>"
+        f"<span class='what' title='{_esc(leg.sel.text)}'>{_esc(leg.sel.text)}</span>"
+        f"<span class='p'>{leg.sel.p:.0%}{'' if leg.hit is None else (' ✓' if leg.hit else ' ✗')}</span>"
+        f"<span class='match'>{_esc(leg.home)} – {_esc(leg.away)} · {_esc(leg.sel.family)}</span></div>"
+        for leg in parlay.legs)
+    days = sim[sim["name"] == parlay.name]
+    hist_html = f"{days['hit'].mean():.0%}" if len(days) else "—"
+    hist_title = (f"Con la misma regla, este parlay salió {int(days['hit'].sum())} de {len(days)} días de validación "
+                  f"(el modelo le daba {days['p'].mean():.0%} en promedio)" if len(days) else "Sin historial")
+    status = "" if parlay.hit is None else (" · ✓ salió" if parlay.hit else " · ✗ no salió")
+    return (f"<div class='pd-parlay'><div class='pd-parlay-head'><b>{_esc(parlay.name)}</b>"
+            f"<span>{len(parlay.legs)} patas{status}</span></div>{legs}"
+            "<div class='pd-parlay-foot'>"
+            f"<div><span>Modelo</span><b>{parlay.p:.0%}</b></div>"
+            f"<div><span>Cuota justa</span><b>{parlay.fair_odds:.2f}</b></div>"
+            f"<div><span title='{_esc(hist_title)}'>Histórico</span><b>{hist_html}</b></div></div></div>")
+
+
+def _picks_parlays(ctx: DayContext, tz: str) -> None:
+    with st.spinner("Calculando goles, córners y tarjetas…"):
+        picks, skipped = _day_market_picks(ctx)
+    codes = sorted(ctx.models, key=ORDERED_CODES.index)
+    sim = mp.simulate_parlays(_histories(codes))
+    parlays = mp.build_parlays(picks)
+    _day_summary(ctx, tz, f" · {len(picks)} picks para armar" + (
+        f" · {skipped} partido{'s' if skipped != 1 else ''} afuera por separarse de la casa" if skipped else ""))
+    if not parlays:
+        st.markdown("<div class='pd-empty'>No hay picks suficientes para armar parlays en este día (cada parlay necesita "
+                    "al menos 2 partidos distintos del mismo nivel).</div>", unsafe_allow_html=True)
+    else:
+        _section_title("Parlays del día", "El número chico de cada pata es su probabilidad según el modelo")
+        st.markdown("<div class='pd-parlays'>" + "".join(_parlay_html(p, sim, tz) for p in parlays.values()) + "</div>",
+                    unsafe_allow_html=True)
+    if len(sim):
+        _section_title("Cómo les habría ido", f"Un parlay por día con la misma regla, en partidos que el modelo no había "
+                                              f"visto ({len(codes)} competiciones del día)")
+        rows = []
+        for name, _, _ in mp.PARLAYS:
+            d = sim[sim["name"] == name]
+            if len(d):
+                rows.append(f"<tr><td>{_esc(name)}</td><td>{len(d)}</td><td>{int(d['hit'].sum())}</td>"
+                            f"<td>{d['hit'].mean():.0%}</td><td>{d['p'].mean():.0%}</td><td>{d['legs'].mean():.1f}</td></tr>")
+        head = ("<tr><th>Parlay</th><th>Días</th><th>Salieron</th><th>%</th><th>El modelo decía</th>"
+                "<th>Patas</th></tr>")
+        st.markdown(f"<div class='pd-card'><table class='pd-mini'>{head}{''.join(rows)}</table></div>",
+                    unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
