@@ -5,7 +5,8 @@ Usa el marcador público de ESPN
 `dates=AAAA&limit=1000` devuelve el año natural completo y `dates=AAAAMMDD` un
 día. Cada evento trae goles, tiros, tiros a puerta, córners y tarjetas
 (amarillas y rojas, de la lista de incidencias) de los partidos jugados, si se
-jugó en campo neutral y, en los partidos por jugar, las cuotas de DraftKings
+jugó en campo neutral (ESPN casi nunca lo marca en copas: ver
+`competitions.mark_neutral`), el estadio y, en los partidos por jugar, las cuotas de DraftKings
 (moneyline 1X2 y Over/Under).
 
 Como no hay xG, la señal de calidad de ocasiones es un **xG aproximado**:
@@ -38,7 +39,7 @@ ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) football-predictor-macho"}
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "espn_cache"
 CURRENT_YEAR_CACHE_TTL_S = 3 * 3600
-CACHE_VERSION = "v3"  # v3: córners y tarjetas
+CACHE_VERSION = "v4"  # v3: córners y tarjetas; v4: estadio
 XG_PER_SHOT_ON_TARGET = 0.2295
 XG_PER_SHOT_OFF_TARGET = 0.0647
 EXTRA_TIME_STATUSES = {"STATUS_FINAL_AET", "STATUS_FINAL_PEN"}
@@ -150,6 +151,7 @@ def trim_event(event: dict) -> dict | None:
         "status": name,
         "completed": bool(status.get("completed")),
         "neutral": bool(competition.get("neutralSite")),
+        "venue": str((competition.get("venue") or {}).get("id") or "") or None,
         "season": (event.get("season") or {}).get("year"),
         "home": side(sides["home"]),
         "away": side(sides["away"]),
@@ -346,6 +348,7 @@ def events_frame(events: list[dict], competition: str) -> pd.DataFrame:
                 "played": played,
                 "extra_time": e["status"] in EXTRA_TIME_STATUSES,
                 "neutral": e["neutral"],
+                "venue": e.get("venue"),
                 "hg": h["score"] if played else np.nan,
                 "ag": a["score"] if played else np.nan,
                 "h_sig": float(pseudo_xg(h["shots"], h["sot"])) if played and has_shots else np.nan,
@@ -357,8 +360,8 @@ def events_frame(events: list[dict], competition: str) -> pd.DataFrame:
             }
         )
     columns = ["id", "competition", "season", "datetime", "home", "away", "home_id", "away_id", "home_abbr",
-               "away_abbr", "played", "extra_time", "neutral", "hg", "ag", "h_sig", "a_sig", "odds_h", "odds_d",
-               "odds_a", "odds_over25", "odds_under25", *STAT_COLUMNS]
+               "away_abbr", "played", "extra_time", "neutral", "venue", "hg", "ag", "h_sig", "a_sig", "odds_h",
+               "odds_d", "odds_a", "odds_over25", "odds_under25", *STAT_COLUMNS]
     return pd.DataFrame(rows, columns=columns)
 
 

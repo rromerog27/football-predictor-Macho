@@ -6,6 +6,12 @@
   las ligas de sus participantes (su "pool"): así la fuerza de un equipo sale
   sobre todo de su liga, y los cruces entre países de la copa calibran unas
   ligas frente a otras.
+- Las copas nacionales (Copa del Rey, FA Cup...) igual, con las ligas de su país
+  que tiene ESPN (las divisiones inferiores ubican a los equipos chicos). En las
+  copas no se pronostican partidos de equipos con casi ningún partido en 12 meses
+  (amateurs de categorías que el modelo no sigue: ver `match_model.predict_match`).
+- ESPN casi nunca marca el campo neutral en copas (finales, semifinales en un
+  estadio neutral, la Copa Argentina entera): se deduce del estadio (`mark_neutral`).
 - El calendario del día y las cuotas salen de ESPN en todas las competiciones
   (en las de Understat, las cuotas se cruzan por hora y nombre de equipo).
 - Córners y tarjetas (para src/corners_cards.py) también salen de ESPN: en las ligas
@@ -44,6 +50,7 @@ ESPN_CUP_YEARS = 3  # años naturales del pool de una copa (con 2, los partidos 
 ESPN_STATS_YEARS = 3  # años naturales de córners y tarjetas de ESPN en las ligas de Understat
 MAX_WORKERS = 8
 MIN_MAPPING_SIMILARITY = 0.85  # nombres ESPN ↔ Understat del mismo club (p. ej. "Leeds United" ↔ "Leeds")
+MIN_HOME_VENUE_MATCHES = 3  # partidos de local en un estadio para tomarlo como estadio del equipo
 
 
 @dataclass(frozen=True)
@@ -68,6 +75,10 @@ CONCACAF_POOL = ("mex.1", "usa.1", "crc.1", "hon.1", "gua.1")
 # Las copas de una misma confederación se modelan juntas: más cruces entre países calibran mejor las ligas.
 UEFA_CUPS = ("uefa.champions", "uefa.europa", "uefa.europa.conf")
 CONMEBOL_CUPS = ("conmebol.libertadores", "conmebol.sudamericana")
+# Copas nacionales: las ligas del país que tiene ESPN, divisiones inferiores incluidas (los equipos de más
+# abajo, sin liga en ESPN, no se pronostican). Las dos copas de un país se modelan juntas.
+ENG_POOL = ("eng.1", "eng.2", "eng.3", "eng.4", "eng.5")
+SCO_POOL = ("sco.1", "sco.2", "sco.3", "sco.4")
 
 COMPETITIONS = [
     # Europa — con xG real (Understat)
@@ -115,13 +126,44 @@ COMPETITIONS = [
                 aliases=("sudamericana",)),
     Competition("concacaf.champions", "Concacaf Champions Cup", "Copas internacionales", pool=CONCACAF_POOL,
                 aliases=("concachampions",)),
+    Competition("concacaf.leagues.cup", "Leagues Cup", "Copas internacionales", pool=("mex.1", "usa.1"),
+                aliases=("leagues cup",)),
+    # Copas nacionales
+    Competition("esp.copa_del_rey", "Copa del Rey", "Copas nacionales", pool=("esp.1", "esp.2")),
+    Competition("eng.fa", "FA Cup", "Copas nacionales", pool=ENG_POOL + ("eng.league_cup",),
+                aliases=("copa de inglaterra",)),
+    Competition("eng.league_cup", "Carabao Cup", "Copas nacionales", pool=ENG_POOL + ("eng.fa",),
+                aliases=("carabao", "league cup", "efl cup")),
+    Competition("ger.dfb_pokal", "DFB-Pokal", "Copas nacionales", pool=("ger.1", "ger.2"),
+                aliases=("pokal", "copa de alemania")),
+    Competition("ita.coppa_italia", "Coppa Italia", "Copas nacionales", pool=("ita.1", "ita.2"),
+                aliases=("copa de italia",)),
+    Competition("fra.coupe_de_france", "Copa de Francia", "Copas nacionales", pool=("fra.1", "fra.2"),
+                aliases=("coupe de france",)),
+    Competition("por.taca.portugal", "Taça de Portugal", "Copas nacionales", pool=("por.1",),
+                aliases=("copa de portugal", "taca de portugal")),
+    Competition("ned.cup", "Copa KNVB (Países Bajos)", "Copas nacionales", pool=("ned.1", "ned.2"),
+                aliases=("knvb", "copa de holanda")),
+    Competition("sco.tennents", "Copa de Escocia", "Copas nacionales", pool=SCO_POOL + ("sco.cis",),
+                aliases=("scottish cup",)),
+    Competition("sco.cis", "Copa de la Liga escocesa", "Copas nacionales", pool=SCO_POOL + ("sco.tennents",),
+                aliases=("scottish league cup",)),
+    Competition("bra.copa_do_brazil", "Copa do Brasil", "Copas nacionales", pool=("bra.1", "bra.2"),
+                aliases=("copa de brasil",)),
+    Competition("arg.copa", "Copa Argentina", "Copas nacionales", pool=("arg.1", "arg.2")),
+    Competition("col.copa", "Copa Colombia", "Copas nacionales", pool=("col.1", "col.2")),
+    Competition("usa.open", "US Open Cup", "Copas nacionales", pool=("usa.1", "usa.usl.1", "usa.usl.l1"),
+                aliases=("open cup",)),
     # Asia
     Competition("jpn.1", "J1 League", "Asia", aliases=("japon",)),
 ]
 BY_CODE = {c.code: c for c in COMPETITIONS}
-REGIONS = ["Europa", "América", "Copas internacionales", "Asia"]
+REGIONS = ["Europa", "América", "Copas internacionales", "Copas nacionales", "Asia"]
 DEFAULT_CODES = ["eng.1", "esp.1", "ger.1", "ita.1", "fra.1", "por.1", "ned.1", "mex.1", "arg.1", "bra.1",
-                 "usa.1", "uefa.champions", "uefa.europa", "conmebol.libertadores", "conmebol.sudamericana"]
+                 "usa.1", "uefa.champions", "uefa.europa", "conmebol.libertadores", "conmebol.sudamericana",
+                 "concacaf.leagues.cup", "esp.copa_del_rey", "eng.fa", "eng.league_cup", "ger.dfb_pokal",
+                 "ita.coppa_italia", "fra.coupe_de_france", "por.taca.portugal", "ned.cup", "bra.copa_do_brazil",
+                 "arg.copa"]
 
 
 def resolve_competition(name: str) -> Competition:
@@ -232,6 +274,37 @@ def attach_espn_stats(matches: pd.DataFrame, espn: pd.DataFrame, competition: st
     return out
 
 
+def home_venues(matches: pd.DataFrame, exclude: frozenset[str] = frozenset(),
+                min_matches: int = MIN_HOME_VENUE_MATCHES) -> dict[str, frozenset[str]]:
+    """Estadios de cada equipo: donde jugó de local al menos `min_matches` partidos ya jugados, sin contar
+    las competiciones de `exclude` (las copas: sus semifinales y finales en estadio neutral a veces vienen
+    con un local). Puede haber más de uno (equipos que cambiaron de estadio en la ventana de datos)."""
+    if "venue" not in matches:
+        return {}
+    home = matches[matches["played"].astype(bool) & matches["venue"].notna() & ~matches["neutral"].astype(bool)
+                   & ~matches["competition"].isin(exclude)]
+    counts = home.groupby(["home", "venue"]).size()
+    counts = counts[counts >= min_matches].reset_index()
+    return {team: frozenset(g["venue"]) for team, g in counts.groupby("home")}
+
+
+def mark_neutral(matches: pd.DataFrame, venues: dict[str, frozenset[str]],
+                 competitions: frozenset[str] | None = None) -> pd.DataFrame:
+    """Marca como neutrales los partidos (de `competitions`, o todos) que el local no juega en su estadio
+    (`home_venues`): finales y semifinales en estadio neutral, o la Leagues Cup, donde ESPN suele poner de
+    local al equipo mexicano aunque se juegue en la cancha del de la MLS (ahí neutral es lo menos malo sin
+    dar vuelta el partido). Sin estadio, o si no se conoce el del local (p. ej. un amateur), queda como lo
+    da ESPN."""
+    if "venue" not in matches or not venues:
+        return matches
+    scope = matches["competition"].isin(competitions) if competitions is not None else True
+    home_known = matches["home"].map(lambda t: bool(venues.get(t)))
+    elsewhere = [bool(v) and v not in venues.get(h, ()) for h, v in zip(matches["home"], matches["venue"].fillna(""))]
+    out = matches.copy()
+    out["neutral"] = out["neutral"].astype(bool) | (scope & home_known & pd.Series(elsewhere, index=out.index))
+    return out
+
+
 def espn_odds_codes(comp: Competition) -> tuple[str, ...]:
     """Competiciones cuya señal de mercado sale de las cuotas pasadas de ESPN: la propia y su pool
     (en copas), si football-data no las cubre. Una petición por partido de los últimos ~13 meses
@@ -282,6 +355,8 @@ def load_competition(comp: Competition, refresh: bool = False, progress: Callabl
     signal = "xG aproximado (tiros)" if coverage >= 0.5 else "goles"
     since = pd.Timestamp(f"{years[0]}-01-01") + pd.Timedelta(days=180)  # medio año de historial previo
     cups = frozenset(c.code for c in COMPETITIONS if c.is_cup)
+    if comp.is_cup:
+        matches = mark_neutral(matches, home_venues(matches, cups), cups)
     if with_market:
         matches, market_sources = market_signal.attach(matches, progress, espn_odds_codes(comp))
         sources = sources + market_sources
@@ -342,7 +417,9 @@ def fixture_rows_for_model(comp: Competition, data: LeagueData, espn_day: pd.Dat
     en las de Understat, la fila de Understat (equipos con su nombre) con las cuotas y los ids de ESPN.
     Los partidos de ESPN que no se emparejan se devuelven con su nombre de ESPN."""
     if not comp.understat:
-        return espn_day
+        if not comp.is_cup:
+            return espn_day
+        return mark_neutral(espn_day, home_venues(data.matches, frozenset(c.code for c in COMPETITIONS if c.is_cup)))
     us = data.focus_matches
     pairs = match_to_source(espn_day, us)
     odds_cols = ["odds_h", "odds_d", "odds_a", "odds_over25", "odds_under25"]
@@ -407,5 +484,6 @@ def predict_fixture(comp: Competition, model: LeagueModel, home: str, away: str)
 def coverage_note(comp: Competition, data: LeagueData) -> str:
     """Texto corto de la señal usada (y, en copas, cuántas ligas alimentan el modelo)."""
     if comp.is_cup:
-        return f"{data.signal_name} · junto a {sum(c not in UEFA_CUPS + CONMEBOL_CUPS for c in comp.pool)} ligas"
+        leagues = sum(c not in BY_CODE or not BY_CODE[c].is_cup for c in comp.pool)
+        return f"{data.signal_name} · junto a {leagues} liga{'' if leagues == 1 else 's'}"
     return data.signal_name
