@@ -427,6 +427,16 @@ def window_ratings(index: MatchIndex, cutoff: pd.Timestamp, cache: dict) -> dict
     return cache[day]
 
 
+def window_matches(index: MatchIndex, team: str, cutoff: pd.Timestamp) -> int:
+    """Partidos usables del equipo en los WINDOW_DAYS días anteriores a `cutoff` (el n_window de su instantánea)."""
+    arrays = index.team_arrays.get(team)
+    if arrays is None:
+        return 0
+    times = arrays["times"]
+    return int(np.searchsorted(times, cutoff.to_datetime64(), "left")
+               - np.searchsorted(times, (cutoff - pd.Timedelta(days=WINDOW_DAYS)).to_datetime64(), "left"))
+
+
 def match_snapshot(index: MatchIndex, home: str, away: str, cutoff: pd.Timestamp, ratings_cache: dict,
                    with_rows: bool = False) -> tuple[dict, dict, dict[str, LeagueRatings]] | None:
     ratings = window_ratings(index, cutoff, ratings_cache)
@@ -733,18 +743,20 @@ class TrainedModels:
 
 def train_models(hist: pd.DataFrame, has_signal: bool = True, focus: str | None = None,
                  kappa_exclude: frozenset[str] = frozenset(),
-                 market_weights: tuple[float, ...] = (0.0,)) -> TrainedModels:
+                 market_weights: tuple[float, ...] = (0.0,), validate_low_data: bool = True) -> TrainedModels:
     """Ajusta el modelo de Poisson sobre el histórico de instantáneas. `kappa_exclude`: competiciones
     sin calibración propia de goles (las copas: pocos partidos, y en validación empeoraba).
-    `market_weights`: pesos posibles de la fuerza según el mercado (columnas *_mkt del histórico)."""
+    `market_weights`: pesos posibles de la fuerza según el mercado (columnas *_mkt del histórico).
+    `validate_low_data=False` (copas): la validación deja fuera los partidos con pocos datos de algún
+    equipo, que en copas no se pronostican."""
     hist = hist.sort_values("datetime").reset_index(drop=True)
     n_val = max(MIN_VAL_ROWS, int(len(hist) * VAL_FRACTION))
     if len(hist) - n_val < MIN_TRAIN_ROWS:
         raise PredictionError(f"Histórico insuficiente para entrenar y validar el modelo ({len(hist)} partidos).")
     in_train = np.arange(len(hist)) < len(hist) - n_val
-    val_mask = ~in_train
-    # Se ajusta solo con partidos con datos suficientes; se valida con todos (como se usa el modelo).
+    # Se ajusta solo con partidos con datos suficientes; se valida con los que se pronostican (en ligas, todos).
     low = hist["low_data"].to_numpy(bool) if "low_data" in hist else np.zeros(len(hist), bool)
+    val_mask = ~in_train if validate_low_data else ~in_train & ~low
     train_mask = in_train & ~low
     train = hist[train_mask]
     comp = hist["competition"].to_numpy()
@@ -935,7 +947,8 @@ def train_league(data: LeagueData) -> LeagueModel:
         raise PredictionError(f"Sin histórico suficiente para entrenar {data.name}.")
     pooled = (hist["competition"] != data.competition).any()
     return LeagueModel(data, train_models(hist, data.index.has_signal, data.competition if pooled else None,
-                                          data.kappa_exclude, data.market_weights))
+                                          data.kappa_exclude, data.market_weights,
+                                          validate_low_data=data.train_on_focus))
 
 
 @dataclass
@@ -1024,6 +1037,12 @@ def predict_match(model: LeagueModel, home: str, away: str, cutoff: pd.Timestamp
     if cutoff is None:
         cutoff = utc_now()
     neutral = bool(fixture["neutral"]) if fixture is not None and pd.notna(fixture.get("neutral")) else False
+    if not data.train_on_focus:  # copas: los equipos de categorías que el modelo no sigue (amateurs) no se pronostican
+        few = [t for t in (home, away) if window_matches(data.index, t, cutoff) < MIN_MATCHES]
+        if few:
+            verb = "casi no tiene" if len(few) == 1 else "casi no tienen"
+            raise PredictionError(f"Sin pronóstico: {' y '.join(few)} {verb} partidos en los últimos 12 meses "
+                                  "(categoría que el modelo no sigue).")
 
     snap = match_snapshot(data.index, home, away, cutoff, {}, with_rows=True)
     if snap is None:

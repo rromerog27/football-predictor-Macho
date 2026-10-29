@@ -804,10 +804,11 @@ def _row_html(item: DayItem, tz: str, now: pd.Timestamp, show_league: bool) -> s
         win = " win" if score and score[k] > score[1 - k] else ""
         teams.append(f"<div class='pd-r-team{win}'>{_crest(team_id, name)}<span>{_esc(name)}</span>{goals}</div>")
     teams_html = f"<div class='pd-r-teams'>{''.join(teams)}</div>"
-    if pred is None:
+    if pred is None:  # en copas, muchos amateurs: la fila dice solo "Sin pronóstico" y el motivo va en el título
+        short = item.error.split(":")[0] if item.error.startswith("Sin pronóstico:") else item.error
         return (f"<details class='pd-row' id='m-{item.key}'><summary>{time_html}{teams_html}"
-                f"<div class='pd-r-probs pd-note'>{_esc(item.error)}</div><div></div><div></div><div></div></summary>"
-                "</details>")
+                f"<div class='pd-r-probs pd-note' title='{_esc(item.error)}'>{_esc(short)}</div>"
+                "<div></div><div></div><div></div></summary></details>")
     best = int(pred.p_final.argmax())
     nums = "".join(f"<b>{x * 100:.0f}</b>" if k == best else f"<span>{x * 100:.0f}</span>"
                    for k, x in enumerate(pred.p_final))
@@ -1086,6 +1087,10 @@ def section_today(tz: str) -> None:
             "Uruguay y Paraguay, sin tiros publicados, solo goles.\n"
             "- **Copas internacionales:** se modelan junto con las ligas de sus participantes, para que la fuerza "
             "de equipos de países distintos sea comparable.\n"
+            "- **Copas nacionales:** junto con las ligas de su país que tiene ESPN (divisiones inferiores "
+            "incluidas). Los equipos de categorías que el modelo no sigue (amateurs, casi sin partidos en 12 "
+            "meses) salen sin pronóstico: con ellos el modelo fallaba mucho más que el mercado. Como ESPN no "
+            "marca la cancha neutral en copas, se deduce del estadio (finales, semifinales, Copa Argentina).\n"
             "- **Poisson (Dixon-Coles):** fuerza de ataque/defensa ajustada por rival (12 meses ponderados por "
             "antigüedad, mezcla de señal y goles con pesos elegidos con datos) → goles esperados λ, con el total "
             "acercado a la media de la competición → matriz de marcadores con la corrección de Dixon-Coles. "

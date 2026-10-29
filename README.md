@@ -14,7 +14,7 @@ trading en EA SPORTS FC 27 Ultimate Team (ver "Sección FC 27 Mercado" más
 abajo). No comparte datos con el predictor de partidos.
 
 La página **Partidos del día** también usa internet: descarga resultados y
-xG (Understat) o tiros y cuotas (ESPN) de 33 ligas y copas y muestra, para
+xG (Understat) o tiros y cuotas (ESPN) de 48 ligas y copas y muestra, para
 los partidos de la fecha elegida, la predicción de un modelo de Poisson
 (Dixon-Coles) comparada con el mercado; también
 permite correr el modelo para cualquier cruce de una competición. El mismo modelo se puede
@@ -157,7 +157,7 @@ football_predictor/
 ├── app.py                    # Punto de entrada: configuración y navegación entre páginas
 ├── views/
 │   ├── fc27_mercado.py       # Página Mercado FC 27
-│   ├── partidos_del_dia.py   # Página Partidos del día (predicciones de 33 ligas y copas)
+│   ├── partidos_del_dia.py   # Página Partidos del día (predicciones de 48 ligas y copas)
 │   └── predictor.py          # Página Predictor de partidos
 ├── modelo_prediccion.py      # Predicción por terminal (el modelo de Partidos del día)
 ├── requirements.txt          # Dependencias de la app (las que instala Streamlit Cloud)
@@ -225,7 +225,7 @@ football_predictor/
 | `src/market_odds.py` | Convierte cuotas 1X2 a probabilidad implícita (quitando el margen de la casa), evalúa qué tan bien predice el mercado los partidos de prueba, y simula en retrospectiva una estrategia de apuestas de valor comparando el modelo contra el mercado. |
 | `views/partidos_del_dia.py` | Página Partidos del día, con cinco pestañas: los partidos de la fecha (en la zona horaria del navegador) con la predicción y el mercado de cada uno, los picks del día (resultado, otros mercados y parlays), los mercados de goles, córners y tarjetas, "Analizar" un partido y el rendimiento del modelo. Solo presenta: el modelo vive en `src/match_model.py` y `src/corners_cards.py`, y las cuentas en `src/performance.py`, `src/markets.py` y `src/market_picks.py`. |
 | `src/match_model.py` | Modelo independiente de la fuente: fuerza ajustada por rival (señal y goles), Poisson con Dixon-Coles, validación y predicción de un partido (con las probabilidades del mercado si hay cuotas). |
-| `src/competitions.py` | Registro de las 33 ligas y copas (fuente, región, pool de ligas de las copas), carga de sus datos, partidos del día y cruce de cuotas de ESPN con los partidos de Understat. |
+| `src/competitions.py` | Registro de las 48 ligas y copas (fuente, región, pool de ligas de las copas), carga de sus datos (en copas, con el campo neutral deducido del estadio), partidos del día y cruce de cuotas de ESPN con los partidos de Understat. |
 | `src/understat_source.py` | Descarga y caché del xG de Understat, convertido a las columnas estándar del modelo. |
 | `src/football_data_source.py` | Descarga y caché de football-data.co.uk: resultados con cuotas de cierre (Pinnacle o media del mercado, 1X2 y Over/Under), descartando cuotas corruptas. |
 | `src/market_signal.py` | Despeja los goles esperados que implican las cuotas de cierre de cada partido jugado (football-data.co.uk o ESPN), empareja nombres por resultados y los añade como señal de mercado. |
@@ -235,7 +235,7 @@ football_predictor/
 | `src/market_picks.py` | Regla de picks de goles, córners y tarjetas por niveles (fijo, intermedio, arriesgado), su prueba con los partidos de validación, y los parlays del día con su simulación histórica. |
 | `src/markets.py` | Mercados de un partido (goles desde la matriz de marcadores; córners y tarjetas desde `src/corners_cards.py`) con probabilidad, cuota justa y partido medio, los destacados del día y los aciertos de cada mercado. |
 | `src/backtest.py` | Cruza las predicciones de validación con las cuotas de cierre (football-data.co.uk o ESPN) y compara log loss, mezcla modelo + mercado, Over/Under y ROI simulado. |
-| `src/espn_source.py` | Descarga y caché del marcador de ESPN (resultados, tiros, córners, tarjetas, calendario, campo neutral, cuotas de DraftKings) y cálculo del xG aproximado con tiros. |
+| `src/espn_source.py` | Descarga y caché del marcador de ESPN (resultados, tiros, córners, tarjetas, calendario, campo neutral, estadio, cuotas de DraftKings) y cálculo del xG aproximado con tiros. |
 | `src/visualizations.py` | Construye los gráficos Plotly (barras, radar, evolución de forma, mapas de calor, importancia de variables) a partir de datos ya calculados. |
 | `src/utils.py` | Funciones auxiliares compartidas: división segura, formateo de porcentajes/métricas, logging, semilla aleatoria y umbrales de suficiencia de datos. |
 
@@ -364,14 +364,15 @@ automáticas.
 ## Partidos del día y predicción por terminal
 
 La página **Partidos del día** es la que se abre por defecto al ejecutar
-`streamlit run app.py`. Cubre **33 ligas y copas** (Europa, América, copas
-internacionales y Japón). Tiene cinco pestañas:
+`streamlit run app.py`. Cubre **48 ligas y copas** (Europa, América, copas
+internacionales, copas nacionales y Japón). Tiene cinco pestañas:
 
 - **Partidos:** un panel con la fecha (con ‹ › para cambiar de día),
   un buscador de equipos ("man u" encuentra Manchester United) y la
-  selección de ligas y copas (por defecto 15: las 5 grandes, Portugal,
+  selección de ligas y copas (por defecto 26: las 5 grandes, Portugal,
   Países Bajos, Liga MX, Argentina, Brasil, MLS, Champions, Europa League,
-  Libertadores y Sudamericana). Debajo:
+  Libertadores, Sudamericana, Leagues Cup y las copas nacionales de esos
+  países). Debajo:
   - **Destacados**, en cuatro vistas: los favoritos más claros, los
     partidos más parejos, donde el modelo más se aleja del mercado y, cerca
     del inicio, los partidos con alineaciones confirmadas. Cada tarjeta lleva
@@ -501,12 +502,29 @@ la validación de la competición.
   ausente, igual que un partido sin incidencias. Uruguay no publica córners
   ni tarjetas y Paraguay casi no publica córners.
 - **Copas internacionales** (Champions, Europa League, Conference League,
-  Libertadores, Sudamericana, Concacaf Champions Cup): se modelan junto con
-  las ligas de sus participantes (20 ligas UEFA, 10 CONMEBOL, 5 CONCACAF;
-  3 años de ESPN), así la fuerza de cada equipo sale sobre todo de su liga y
-  los cruces entre países calibran unas ligas frente a otras. El suavizado de
-  cada equipo apunta a la media de **su** liga (no a la de todo el pool) y el
-  nivel de cada liga sale de esos cruces (ver "Copas contra el mercado").
+  Libertadores, Sudamericana, Concacaf Champions Cup, Leagues Cup): se modelan
+  junto con las ligas de sus participantes (20 ligas UEFA, 10 CONMEBOL, 5
+  CONCACAF; Liga MX y MLS en la Leagues Cup; 3 años de ESPN), así la fuerza de
+  cada equipo sale sobre todo de su liga y los cruces entre países calibran
+  unas ligas frente a otras. El suavizado de cada equipo apunta a la media de
+  **su** liga (no a la de todo el pool) y el nivel de cada liga sale de esos
+  cruces (ver "Copas contra el mercado").
+- **Copas nacionales** (Copa del Rey, FA Cup, Carabao Cup, DFB-Pokal, Coppa
+  Italia, Copa de Francia, Taça de Portugal, Copa KNVB, Copa de Escocia, Copa
+  de la Liga escocesa, Copa do Brasil, Copa Argentina, Copa Colombia y US Open
+  Cup): igual, con las ligas de su país que tiene ESPN, divisiones inferiores
+  incluidas (Inglaterra hasta la National League, Escocia hasta la League Two,
+  la USL en la Open Cup...); las dos copas de Inglaterra y las dos de Escocia
+  se modelan juntas. Los partidos de equipos con menos de 5 partidos en 12
+  meses (amateurs de categorías que ESPN no tiene) salen **sin pronóstico**
+  (ver "Copas nacionales" en los resultados).
+- **Campo neutral en copas:** ESPN casi nunca lo marca (ni en la final de la
+  FA Cup ni en la Copa Argentina, que se juega entera en cancha neutral). Se
+  deduce del estadio: un partido de copa es neutral si el local no lo juega
+  en ninguno de sus estadios (donde jugó de local al menos 3 partidos de liga).
+  Cubre finales y semifinales en estadio neutral y la Leagues Cup, donde ESPN
+  suele poner de local al equipo mexicano aunque se juegue en la cancha del de
+  la MLS (40 de 201 partidos).
 - **football-data.co.uk** (señal de mercado y backtest): resultados con
   cuotas de cierre de las ligas principales y sus segundas divisiones, y de
   Liga MX, MLS, Argentina, Brasil, Japón, Rusia, Grecia, Austria, Dinamarca,
@@ -763,6 +781,32 @@ entre ellas (equivalía a sumarle a cada liga decenas de partidos contra un
   30 y 100 quedan más lejos del mercado), 1 o 4 partidos de suavizado por
   equipo (1 igual, 4 peor) y estirar además la diferencia local/visitante
   solo en copas (−0.002 y −0.001 de log loss, dentro del ruido).
+
+**Copas nacionales** (octubre de 2026). Se modelan como las internacionales,
+con las ligas de su país (ver "Datos"). El problema eran los equipos
+chicos: un amateur que solo jugó una ronda previa quedaba con la fuerza de un
+equipo medio del pool (en la primera ronda de la Copa del Rey el modelo le
+daba 57% a UB Lebrijana contra el Getafe; el mercado, 1%). En los partidos de
+copa de validación con algún equipo de menos de 5 partidos en 12 meses (114,
+51 con cuotas) el modelo daba 0.99 de log loss y el mercado 0.62: por eso
+esos partidos **no se pronostican** (tampoco en las copas internacionales,
+donde eran 20 partidos de rondas previas con 1.01 contra 0.93 del mercado).
+Con equipos conocidos, en partidos que el modelo no había visto:
+
+| Copas | Partidos | Aciertos (mercado) | Log loss modelo | Mercado | Distancia |
+|---|---|---|---|---|---|
+| 10 de Europa (Inglaterra, España, Alemania, Italia, Francia, Portugal, Países Bajos, Escocia) | 274 | 76% (74%) | 0.759 | 0.740 | +0.020 ± 0.014 |
+| 5 de América (Brasil, Argentina, Colombia, US Open Cup, Leagues Cup) | 192 | 59% (59%) | 0.946 | 0.935 | +0.010 ± 0.015 |
+| Total | 466 | 69% (68%) | 0.837 | 0.821 | +0.016 ± 0.011 |
+
+(Log loss sobre los 424 partidos con cuotas de ESPN.) Queda tan cerca del
+mercado como en las copas internacionales. Donde más se aleja es en la Carabao
+Cup (+0.061) y la DFB-Pokal (+0.083): son las copas con más rotaciones y el
+ajuste por alineaciones no se usa en copas. Con el campo neutral deducido del
+estadio, la semifinal de la Copa de la Liga escocesa Rangers–Aberdeen (en
+Hampden) pasó de 76/13/10 a 65/19/17 (mercado 61/23/16); en las copas
+internacionales, en los partidos que ya se pronosticaban, no cambia nada
+(+0.0001 ± 0.0012 en 304 partidos UEFA, −0.0006 ± 0.0046 en 249 CONMEBOL).
 
 **Córners y tarjetas** (`src/corners_cards.py`, `src/markets.py`). Un modelo
 aparte del de goles, por equipo:
