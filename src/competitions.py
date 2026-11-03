@@ -12,6 +12,9 @@
   (amateurs de categorías que el modelo no sigue: ver `match_model.predict_match`).
 - ESPN casi nunca marca el campo neutral en copas (finales, semifinales en un
   estadio neutral, la Copa Argentina entera): se deduce del estadio (`mark_neutral`).
+- Si Understat no responde, las 5 grandes y la liga rusa se cargan de ESPN (xG
+  aproximado): frente al mercado el modelo queda igual (ver el README), y la app
+  sigue funcionando. Tras un fallo, las demás ligas van directo a ESPN un rato.
 - El calendario del día y las cuotas salen de ESPN en todas las competiciones
   (en las de Understat, las cuotas se cruzan por hora y nombre de equipo).
 - Córners y tarjetas (para src/corners_cards.py) también salen de ESPN: en las ligas
@@ -21,6 +24,7 @@
 from __future__ import annotations
 
 import difflib
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -51,6 +55,8 @@ ESPN_STATS_YEARS = 3  # años naturales de córners y tarjetas de ESPN en las li
 MAX_WORKERS = 8
 MIN_MAPPING_SIMILARITY = 0.85  # nombres ESPN ↔ Understat del mismo club (p. ej. "Leeds United" ↔ "Leeds")
 MIN_HOME_VENUE_MATCHES = 3  # partidos de local en un estadio para tomarlo como estadio del equipo
+UNDERSTAT_RETRY_S = 30 * 60  # tras un fallo de Understat, las demás ligas van directo a ESPN durante este tiempo
+_understat_down_until = 0.0
 
 
 @dataclass(frozen=True)
@@ -305,6 +311,39 @@ def mark_neutral(matches: pd.DataFrame, venues: dict[str, frozenset[str]],
     return out
 
 
+def _load_understat(comp: Competition, refresh: bool, progress: Callable[[str], None] | None, lower: tuple[str, ...],
+                    with_market: bool, with_stats: bool, now: pd.Timestamp) -> LeagueData:
+    """`load_competition` de una liga de Understat (xG real); lanza PredictionError si Understat no responde."""
+    matches, sources, current = understat_source.load(comp.understat, comp.code, UNDERSTAT_SEASONS, refresh,
+                                                      now, progress)
+    since = pd.Timestamp(f"{current - UNDERSTAT_SEASONS + 1}-07-01")  # la más antigua: historial previo
+    matches = matches[STANDARD_COLUMNS]
+    if lower:  # historial de los recién ascendidos en la división inferior (xG aproximado de ESPN)
+        years = list(range(since.year - 1, now.year + 1))
+        lower_matches, lower_sources = _fetch_espn_years(list(lower), years, refresh, progress)
+        names = map_team_names(lower_matches, matches)
+        lower_matches = lower_matches.assign(home=lower_matches["home"].replace(names),
+                                             away=lower_matches["away"].replace(names))
+        matches = pd.concat([matches, lower_matches[STANDARD_COLUMNS + STAT_COLUMNS]], ignore_index=True)
+        sources = sources + lower_sources
+    if with_stats:
+        try:
+            stats_years = list(range(now.year - ESPN_STATS_YEARS + 1, now.year + 1))
+            espn_matches, _ = _fetch_espn_years([comp.code], stats_years, refresh, progress)
+            matches = attach_espn_stats(matches, espn_matches, comp.code)
+        except PredictionError:
+            pass  # sin córners ni tarjetas: el modelo de goles no los necesita
+    if with_market:
+        matches, market_sources = market_signal.attach(matches, progress, espn_odds_codes(comp))
+        sources = sources + market_sources
+    return build_league_data(comp.code, comp.name, matches, sources, "xG", since)
+
+
+def from_understat(data: LeagueData) -> bool:
+    """Si los partidos de la competición salieron de Understat (si no respondía, son los de ESPN)."""
+    return bool(data.focus_matches["id"].astype(str).str.startswith("us:").any())
+
+
 def espn_odds_codes(comp: Competition) -> tuple[str, ...]:
     """Competiciones cuya señal de mercado sale de las cuotas pasadas de ESPN: la propia y su pool
     (en copas), si football-data no las cubre. Una petición por partido de los últimos ~13 meses
@@ -318,33 +357,18 @@ def load_competition(comp: Competition, refresh: bool = False, progress: Callabl
     """Descarga los datos de la competición y prepara el modelo (sin entrenarlo). Con `with_market`,
     cruza las cuotas de cierre de football-data.co.uk (y las cuotas pasadas de ESPN donde
     football-data no llega, ver `espn_odds_codes`) como señal de mercado. Con `with_stats`, en las
-    ligas de Understat cruza los córners y tarjetas de ESPN (en las de ESPN ya vienen)."""
+    ligas de Understat cruza los córners y tarjetas de ESPN (en las de ESPN ya vienen). Si Understat no
+    responde, la liga se carga de ESPN y las demás ligas de Understat también, durante UNDERSTAT_RETRY_S."""
+    global _understat_down_until
     now = utc_now()
     lower = comp.lower if include_lower else ()
-    if comp.understat:
-        matches, sources, current = understat_source.load(comp.understat, comp.code, UNDERSTAT_SEASONS, refresh,
-                                                          now, progress)
-        since = pd.Timestamp(f"{current - UNDERSTAT_SEASONS + 1}-07-01")  # la más antigua: historial previo
-        matches = matches[STANDARD_COLUMNS]
-        if lower:  # historial de los recién ascendidos en la división inferior (xG aproximado de ESPN)
-            years = list(range(since.year - 1, now.year + 1))
-            lower_matches, lower_sources = _fetch_espn_years(list(lower), years, refresh, progress)
-            names = map_team_names(lower_matches, matches)
-            lower_matches = lower_matches.assign(home=lower_matches["home"].replace(names),
-                                                 away=lower_matches["away"].replace(names))
-            matches = pd.concat([matches, lower_matches[STANDARD_COLUMNS + STAT_COLUMNS]], ignore_index=True)
-            sources = sources + lower_sources
-        if with_stats:
-            try:
-                stats_years = list(range(now.year - ESPN_STATS_YEARS + 1, now.year + 1))
-                espn_matches, _ = _fetch_espn_years([comp.code], stats_years, refresh, progress)
-                matches = attach_espn_stats(matches, espn_matches, comp.code)
-            except PredictionError:
-                pass  # sin córners ni tarjetas: el modelo de goles no los necesita
-        if with_market:
-            matches, market_sources = market_signal.attach(matches, progress, espn_odds_codes(comp))
-            sources = sources + market_sources
-        return build_league_data(comp.code, comp.name, matches, sources, "xG", since)
+    if comp.understat and time.monotonic() >= _understat_down_until:
+        try:
+            return _load_understat(comp, refresh, progress, lower, with_market, with_stats, now)
+        except PredictionError as exc:  # Understat caído o bloqueado: la misma liga con los datos de ESPN
+            _understat_down_until = time.monotonic() + UNDERSTAT_RETRY_S
+            if progress:
+                progress(f"Understat no responde ({exc}); se usan los datos de ESPN.")
 
     years_back = ESPN_CUP_YEARS if comp.is_cup else ESPN_LEAGUE_YEARS
     years = list(range(now.year - years_back + 1, now.year + 1))
@@ -413,10 +437,10 @@ def match_to_source(espn_rows: pd.DataFrame, source_rows: pd.DataFrame,
 
 
 def fixture_rows_for_model(comp: Competition, data: LeagueData, espn_day: pd.DataFrame) -> pd.DataFrame:
-    """Partidos del día listos para `predict_match`: en ligas de ESPN, las filas de ESPN;
-    en las de Understat, la fila de Understat (equipos con su nombre) con las cuotas y los ids de ESPN.
+    """Partidos del día listos para `predict_match`: con datos de ESPN, las filas de ESPN;
+    con datos de Understat, la fila de Understat (equipos con su nombre) con las cuotas y los ids de ESPN.
     Los partidos de ESPN que no se emparejan se devuelven con su nombre de ESPN."""
-    if not comp.understat:
+    if not from_understat(data):
         if not comp.is_cup:
             return espn_day
         return mark_neutral(espn_day, home_venues(data.matches, frozenset(c.code for c in COMPETITIONS if c.is_cup)))
@@ -470,7 +494,7 @@ def predict_fixture(comp: Competition, model: LeagueModel, home: str, away: str)
     pred = predict_match(model, home, away)
     if pred.match_id is None:
         return pred
-    if comp.understat:
+    if from_understat(model.data):
         fixture = understat_fixture_with_odds(comp, model.data, pred.match_id)
     else:
         rows = model.data.focus_matches[model.data.focus_matches["id"] == pred.match_id]

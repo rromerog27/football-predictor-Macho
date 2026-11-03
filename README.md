@@ -225,7 +225,7 @@ football_predictor/
 | `src/market_odds.py` | Convierte cuotas 1X2 a probabilidad implícita (quitando el margen de la casa), evalúa qué tan bien predice el mercado los partidos de prueba, y simula en retrospectiva una estrategia de apuestas de valor comparando el modelo contra el mercado. |
 | `views/partidos_del_dia.py` | Página Partidos del día, con cinco pestañas: los partidos de la fecha (en la zona horaria del navegador) con la predicción y el mercado de cada uno, los picks del día (resultado, otros mercados y parlays), los mercados de goles, córners y tarjetas, "Analizar" un partido y el rendimiento del modelo. Solo presenta: el modelo vive en `src/match_model.py` y `src/corners_cards.py`, y las cuentas en `src/performance.py`, `src/markets.py` y `src/market_picks.py`. |
 | `src/match_model.py` | Modelo independiente de la fuente: fuerza ajustada por rival (señal y goles), Poisson con Dixon-Coles, validación y predicción de un partido (con las probabilidades del mercado si hay cuotas). |
-| `src/competitions.py` | Registro de las 48 ligas y copas (fuente, región, pool de ligas de las copas), carga de sus datos (en copas, con el campo neutral deducido del estadio), partidos del día y cruce de cuotas de ESPN con los partidos de Understat. |
+| `src/competitions.py` | Registro de las 48 ligas y copas (fuente, región, pool de ligas de las copas), carga de sus datos (en copas, con el campo neutral deducido del estadio; si Understat no responde, de ESPN), partidos del día y cruce de cuotas de ESPN con los partidos de Understat. |
 | `src/understat_source.py` | Descarga y caché del xG de Understat, convertido a las columnas estándar del modelo. |
 | `src/football_data_source.py` | Descarga y caché de football-data.co.uk: resultados con cuotas de cierre (Pinnacle o media del mercado, 1X2 y Over/Under), descartando cuotas corruptas. |
 | `src/market_signal.py` | Despeja los goles esperados que implican las cuotas de cierre de cada partido jugado (football-data.co.uk o ESPN), empareja nombres por resultados y los añade como señal de mercado. |
@@ -480,7 +480,14 @@ la validación de la competición.
 
 - **Understat** (xG real): Premier League, LaLiga, Bundesliga, Serie A,
   Ligue 1 y liga rusa. `https://understat.com/getLeagueData/<liga>/<temporada>`,
-  temporada en curso y 5 anteriores.
+  temporada en curso y 5 anteriores. **Si Understat no responde** (caído o
+  bloqueado), la liga se carga de ESPN con el xG aproximado, como las demás,
+  y tras el fallo las otras ligas de Understat van directo a ESPN durante 30
+  minutos (sin esperar sus reintentos). Frente al mercado da lo mismo: en
+  noviembre de 2026, en las 5 grandes, la distancia media a las cuotas de
+  cierre fue +0.010 con Understat y +0.010 con ESPN (Premier +0.021 / +0.007,
+  LaLiga +0.010 / +0.007, Bundesliga +0.003 / +0.016, Serie A +0.007 /
+  +0.011, Ligue 1 +0.008 / +0.011).
 - **ESPN** (resto de ligas y copas): el marcador público
   `https://site.api.espn.com/apis/site/v2/sports/soccer/<slug>/scoreboard`
   da por año natural los resultados con **tiros y tiros a puerta**, el
