@@ -188,6 +188,7 @@ football_predictor/
 │   ├── lineups.py              # Alineaciones de ESPN: rotación de cada equipo y ajuste del 1X2
 │   ├── backtest.py             # Backtest de las predicciones de validación contra las cuotas de cierre
 │   ├── performance.py          # Aciertos, calibración, historial y regla de los picks (pestañas Picks y Rendimiento)
+│   ├── value_history.py        # Cómo salió apostar cada tipo de valor del modelo en cada liga
 │   ├── corners_cards.py        # Modelo por equipo de córners y tarjetas (binomial negativa) y su validación
 │   ├── markets.py              # Mercados de goles, córners y tarjetas: probabilidad, cuota justa y aciertos
 │   ├── market_picks.py         # Picks de mercados por niveles, su historial y los parlays del día
@@ -203,6 +204,7 @@ football_predictor/
     ├── test_market_odds.py     # Pruebas de probabilidad implícita y simulación de apuestas de valor
     ├── test_fc27.py            # Pruebas de la sección FC 27 Mercado (lectura, historial, señales)
     ├── test_performance.py     # Pruebas de aciertos, calibración, historial y regla de los picks
+    ├── test_value_history.py   # Pruebas del historial del valor
     ├── test_markets.py         # Pruebas de córners y tarjetas (ESPN, modelo) y de los mercados de un partido
     ├── test_market_picks.py    # Pruebas de la regla de picks de mercados, su historial y los parlays
     └── test_modelo_prediccion.py # Pruebas sin red del modelo, sus fuentes (Understat, ESPN) y el script
@@ -231,6 +233,7 @@ football_predictor/
 | `src/market_signal.py` | Despeja los goles esperados que implican las cuotas de cierre de cada partido jugado (football-data.co.uk o ESPN), empareja nombres por resultados y los añade como señal de mercado. |
 | `src/lineups.py` | Lee los titulares de ESPN (~1 h antes del partido), mide cuánto rota cada equipo respecto a sus 10 partidos anteriores y ajusta el 1X2 final. |
 | `src/performance.py` | Funciones puras sobre las predicciones de validación y el backtest: aciertos del modelo y del mercado, favoritos claros, calibración por tramos, historial y la regla de los picks (y de los partidos a evitar). |
+| `src/value_history.py` | Historial del valor: con los partidos de validación y las cuotas de cierre, el ROI de apostar cada tipo de valor del modelo (1X2 por resultado y tramo de puntos, más/menos 2.5, regla de los picks) en cada liga. |
 | `src/corners_cards.py` | Modelo de córners y tarjetas por equipo: tasas a favor y en contra relativas a la media de cada competición, acercamiento a la media de la liga y binomial negativa, con la validación (línea principal y quién tiene más). |
 | `src/market_picks.py` | Regla de picks de goles, córners y tarjetas por niveles (fijo, intermedio, arriesgado), su prueba con los partidos de validación, y los parlays del día con su simulación histórica. |
 | `src/markets.py` | Mercados de un partido (goles desde la matriz de marcadores; córners y tarjetas desde `src/corners_cards.py`) con probabilidad, cuota justa y partido medio, los destacados del día y los aciertos de cada mercado. |
@@ -382,8 +385,10 @@ internacionales, copas nacionales y Japón). Tiene cinco pestañas:
     barra 1X2, Over 2.5 y el pronóstico ("Parejo" si ningún resultado pasa
     del 45%). Una etiqueta amarilla ("+11 al 1") marca dónde el modelo da 10
     o más puntos más que el mercado (≈1 de cada 10 partidos; no es una
-    recomendación de apuesta). Al tocar una fila se despliega el análisis:
-    modelo, alineaciones, mercado, racha y señal de cada equipo.
+    recomendación de apuesta), en rojo con ⚠ si en esa liga apostar ese tipo
+    de valor perdía plata (ver **Historial del valor**). Al tocar una fila se
+    despliega el análisis: modelo, alineaciones, mercado (con el historial del
+    valor), racha y señal de cada equipo.
   - En partidos ya jugados muestra el resultado y si el pronóstico acertó.
     Si no hay partidos ese día, ofrece saltar a la próxima fecha con
     partidos. `?fecha=AAAA-MM-DD` en la URL abre la página en ese día.
@@ -397,7 +402,8 @@ internacionales, copas nacionales y Japón). Tiene cinco pestañas:
   salieron los picks de los últimos 30 días en las competiciones del día. En
   el backtest la regla dio 753 picks y ganó el 74%, pero a cuota de cierre
   quedó en empate (ROI +0.8%): son favoritos que suelen ganar, no una fuente
-  de ganancias. **No es una recomendación de apuesta.**
+  de ganancias. Cada pick dice cómo salió la regla en su liga. **No es una
+  recomendación de apuesta.**
   - **Otros mercados:** picks de goles (más/menos, ambos anotan, goles de
     cada equipo, doble oportunidad, ganar por 2 o más), córners y tarjetas
     en tres niveles: **fijos** (90% o más), **intermedios** (80–90%) y
@@ -413,9 +419,24 @@ internacionales, copas nacionales y Japón). Tiene cinco pestañas:
     fija y 5 en las otras). Muestra la probabilidad del parlay según el
     modelo, la cuota justa y cuántas veces habría salido cada uno en los días
     de validación.
+- **Historial del valor** (`src/value_history.py`): que el modelo vea valor
+  frente a la casa no quiere decir que apostarlo gane. En los partidos de
+  validación cruzados con las cuotas de cierre se apuesta 1 unidad cada vez
+  que se cumplía la misma condición (al local, al empate o al visitante con
+  5–10 o 10+ puntos más que la casa; al más o al menos de 2.5 con 5+ puntos
+  más; la regla de los picks) y se mide el ROI por liga. La app lo muestra
+  junto a cada valor: en rojo si perdía 10% o más, en verde si ganaba 5% o
+  más (con la advertencia de que con pocos partidos puede ser suerte), y
+  "sin historial" con menos de 20 apuestas. En más/menos 2.5, donde la
+  fuente de cierre no trae esas cuotas (Argentina, Brasil, México, MLS...),
+  se usan las previas de ESPN. Ejemplos (noviembre de 2026): en la
+  Championship, el local con 5+ puntos más perdió 21% en 125 partidos; en
+  Argentina, el menos de 2.5 con valor perdió 21% en 128 y el empate 19% en
+  40; en Chile, el local con valor ganó 13% en 138.
 - **Mercados:** goles, córners y tarjetas de los partidos del día, con la
   probabilidad del modelo y la **cuota justa** (1 ÷ probabilidad: si una casa
-  paga más, el modelo ve valor). Arriba, **Lo más claro del día**: por
+  paga más, el modelo ve valor). Bajo el total de goles, el más/menos 2.5 de la
+  casa y, si el modelo se separa 5 puntos o más, su historial en la liga. Arriba, **Lo más claro del día**: por
   familia, los partidos en los que el modelo ve más claro un mercado que en un
   partido medio de la competición está cerca del 50% (más/menos de 2.5 goles,
   ambos anotan, quién saca más córners, la línea principal de tarjetas...),
@@ -697,6 +718,19 @@ Resultado en 7.325 partidos de las 21 competiciones:
   calibración a posteriori gana solo 0.0004, así que la prudencia del
   modelo con los favoritos es información que no tiene, no mala
   calibración) y descontar la temporada anterior tras el parón (−0.0001).
+- Probado y descartado en noviembre de 2026 (27 ligas, 9.241 partidos de
+  validación): en casi todas las ligas el modelo esperaba menos goles de los
+  que salieron (−0.065 por partido; Argentina −0.24, Bélgica −0.27, Serie A
+  −0.19) porque la temporada 2026/27 arrancó con más goles (Serie A 3.2 por
+  partido, Bundesliga 3.5, Eredivisie 3.8). Seguir más rápido ese ritmo no
+  mejora: nivel de goles de la liga ponderado por antigüedad (1X2 +0.0002 y
+  +0.0005, más/menos −0.0007 y −0.0011), acercar el total a la media real de
+  la liga en 12 meses en lugar de la fija del entrenamiento (1X2 +0.00002,
+  más/menos −0.00024 ± 0.00025) y corregir por el error reciente (elegida
+  con el entrenamiento, solo se activaba en Japón). En córners y tarjetas
+  de las copas, ajustar el encogimiento y la dispersión con los partidos de
+  la propia copa en lugar de todo el pool da lo mismo (−0.003 a +0.005 por
+  copa).
 - Probado y descartado en octubre de 2026 (diferencia total sobre los
   mismos 7.325 partidos ± su error estándar; nada supera el ruido):
   - xG aproximado con los penales convertidos: se parece más al xG real

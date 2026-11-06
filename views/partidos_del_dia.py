@@ -37,6 +37,7 @@ from src import corners_cards as cc
 from src import market_picks as mp
 from src import markets
 from src import performance as perf
+from src import value_history as vh
 
 MODEL_TTL_S = 3 * 3600  # igual que la caché del año/temporada en curso: el modelo ve los resultados nuevos
 DAY_TTL_S = 10 * 60
@@ -127,6 +128,15 @@ span.pd-crest { background: var(--fc-surface-2); border: 1px solid var(--fc-bord
 .pd-pill.val { background: var(--fc-yellow-soft); color: var(--fc-yellow-ink);
   border-color: color-mix(in srgb, var(--fc-yellow) 30%, transparent); }
 .pd-pill.live { background: var(--fc-red-soft); color: var(--fc-red-ink); border-color: transparent; }
+.pd-pill.val.bad { background: var(--fc-red-soft); color: var(--fc-red-ink);
+  border-color: color-mix(in srgb, var(--fc-red) 25%, transparent); }
+.pd-pill.val.good { background: var(--fc-green-soft); color: var(--fc-green-ink);
+  border-color: color-mix(in srgb, var(--fc-green) 25%, transparent); }
+/* -- Historial del valor: cómo salió apostar este tipo de valor en la liga -- */
+.pd-vh { font-size: .74rem; color: var(--fc-muted); margin: 4px 0 0; line-height: 1.35; }
+.pd-vh.bad { color: var(--fc-red-ink); }
+.pd-vh.good { color: var(--fc-green-ink); }
+.pd-mkt .pd-vh { flex-basis: 100%; margin-top: 2px; }
 
 /* -- Destacados -- */
 .pd-hl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 6px; }
@@ -450,6 +460,25 @@ def _backtest(code: str) -> backtest.BacktestResult:
 
 
 @st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
+def _value_history(code: str) -> vh.ValueHistory | None:
+    """Cómo salió apostar cada tipo de valor del modelo en la competición (None sin cuotas suficientes)."""
+    try:
+        return vh.build(_backtest(code).matched)
+    except Exception:  # noqa: BLE001 — sin backtest (pocas cuotas, red caída): sin historial
+        return None
+
+
+@st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
+def _over_under_history(code: str) -> vh.ValueHistory | None:
+    """`_value_history` con el más/menos 2.5 completado con las cuotas previas de ESPN (ver
+    backtest.with_espn_over_under): solo se pide cuando el modelo se separa de la casa en ese mercado."""
+    try:
+        return vh.build(backtest.with_espn_over_under(_backtest(code).matched, code))
+    except Exception:  # noqa: BLE001 — sin backtest o sin cuotas: sin historial
+        return None
+
+
+@st.cache_resource(ttl=MODEL_TTL_S, show_spinner=False, max_entries=40)
 def _count_models(code: str) -> dict[str, cc.CountModel]:
     """Modelos de córners y tarjetas de la competición (los que tienen datos de ESPN)."""
     return cc.fit_all(_competition_model(code).data)
@@ -559,14 +588,17 @@ def _market_html(pred: mm.MatchPrediction) -> str:
     pm = pred.market["p_1x2"]
     diff = pred.p_final - pm
     best = int(diff.argmax())
-    chip = ""
+    chip = note = ""
     if diff[best] >= VALUE_THRESHOLD:
         key = ("1", "X", "2")[best]
-        chip = (f"<span class='pd-pill val' title='El modelo da {diff[best] * 100:.1f} puntos más que el mercado "
-                f"a este resultado. No es una recomendación de apuesta.'>{key} +{diff[best] * 100:.0f} vs mercado</span>")
+        rec = _value_record(pred, best, float(diff[best]))
+        chip = (f"<span class='pd-pill val{_vh_class(rec)}' title='El modelo da {diff[best] * 100:.1f} puntos más que "
+                f"el mercado a este resultado. No es una recomendación de apuesta.'>{key} +{diff[best] * 100:.0f} vs "
+                "mercado</span>")
+        note = _vh_note(rec)
     probs = "".join(f"<span>{k} <b>{_pct(p)}</b></span>" for k, p in zip(("1", "X", "2"), pm))
     return (f"<div class='pd-mkt' title='Cuotas de DraftKings vía ESPN, sin el margen de la casa "
-            f"({pred.market['margin'] * 100:.1f}%)'><span class='pd-label'>Mercado</span>{probs}{chip}</div>")
+            f"({pred.market['margin'] * 100:.1f}%)'><span class='pd-label'>Mercado</span>{probs}{chip}{note}</div>")
 
 
 def _rotation_text(team) -> str:
@@ -756,6 +788,26 @@ def _bar(p) -> str:
                              for n, x, c in zip(names, p, colors)) + "</div>")
 
 
+def _value_record(pred: mm.MatchPrediction, k: int, edge: float) -> vh.Record | None:
+    """Cómo salió en la liga apostar el resultado `k` cuando el modelo le daba `edge` puntos más que la casa."""
+    history = _value_history(pred.competition)
+    return history.for_outcome(k, edge) if history is not None else None
+
+
+def _vh_class(rec: vh.Record | None) -> str:
+    return {"en contra": " bad", "a favor": " good"}.get(rec.verdict, "") if rec is not None else ""
+
+
+def _vh_note(rec: vh.Record | None) -> str:
+    """Una línea con el historial: en rojo si perdía plata, en verde si ganaba (con la advertencia de muestra)."""
+    if rec is None:
+        return ("<div class='pd-vh'>Sin historial suficiente en esta liga para saber si este tipo de valor "
+                "gana plata.</div>")
+    icon = {"en contra": "⚠ ", "a favor": "✓ "}.get(rec.verdict, "")
+    luck = " Con estos pocos partidos puede ser suerte." if rec.verdict == "a favor" else ""
+    return f"<div class='pd-vh{_vh_class(rec)}'>{icon}{_esc(rec.text)}.{luck}</div>"
+
+
 def _value_edge(pred: mm.MatchPrediction) -> tuple[int, float] | None:
     """(resultado, puntos) donde el modelo más supera al mercado, si hay cuotas."""
     if not pred.market:
@@ -769,8 +821,12 @@ def _flags_html(pred: mm.MatchPrediction) -> str:
     out = ""
     edge = _value_edge(pred)
     if edge and edge[1] >= VALUE_THRESHOLD:
-        out += (f"<span class='pd-pill val' title='El modelo da {edge[1] * 100:.1f} puntos más que el mercado a este "
-                f"resultado. No es una recomendación de apuesta.'>+{edge[1] * 100:.0f} al {('1', 'X', '2')[edge[0]]}</span>")
+        rec = _value_record(pred, *edge)
+        history = rec.text + "." if rec is not None else "Sin historial suficiente en esta liga."
+        mark = "⚠ " if rec is not None and rec.verdict == "en contra" else ""
+        out += (f"<span class='pd-pill val{_vh_class(rec)}' title='El modelo da {edge[1] * 100:.1f} puntos más que el "
+                f"mercado a este resultado. {_esc(history)} No es una recomendación de apuesta.'>"
+                f"{mark}+{edge[1] * 100:.0f} al {('1', 'X', '2')[edge[0]]}</span>")
     if pred.lineups is not None:
         out += "<span class='pd-pill' title='Alineaciones confirmadas: el 1X2 tiene en cuenta las rotaciones'>XI</span>"
     return out
@@ -861,8 +917,12 @@ def _highlight_items(items: list[DayItem], kind: str) -> list[tuple[DayItem, str
         edges = [(it, _value_edge(it.pred)) for it in pending if it.pred.market]
         for it, (k, d) in sorted(edges, key=lambda x: -x[1][1])[:N_HIGHLIGHTS]:
             pm = it.pred.market["p_1x2"][k]
+            rec = _value_record(it.pred, k, d) if d >= vh.EDGE_BANDS[0][0] else None
+            history = ""
+            if rec is not None:
+                history = f" · {'⚠ ' if rec.verdict == 'en contra' else ''}en esta liga {rec.short}"
             out.append((it, f"+{d * 100:.0f}", f"pts al {('1', 'X', '2')[k]} ({_outcome_label(it.pred, k)})",
-                        f"Modelo {_pct(it.pred.p_final[k])} · mercado {_pct(pm)}"))
+                        f"Modelo {_pct(it.pred.p_final[k])} · mercado {_pct(pm)}{history}"))
     elif kind == "XI confirmados":
         with_xi = [it for it in preds if it.pred.lineups is not None]
         for it in sorted(with_xi, key=lambda it: -abs(it.pred.lineups.shift))[:N_HIGHLIGHTS]:
@@ -1154,8 +1214,14 @@ def _picks_html(picks: list[tuple[DayItem, perf.Pick]], tz: str, now: pd.Timesta
             f"<div><span>Cuota</span><b>{pk.odds:.2f}</b></div>"
             f"<div><span title='Ganancia esperada por unidad si el modelo tuviera razón'>Valor</span>"
             f"<b>{pk.value:+.0%}</b></div>"
-            "</div></div>")
+            f"</div>{_favorites_note(it.code)}</div>")
     return f"<div class='pd-picks'>{''.join(cards)}</div>"
+
+
+def _favorites_note(code: str) -> str:
+    """Cómo salió la regla de los picks de resultado en la liga (partidos ya jugados, cuota de cierre)."""
+    history = _value_history(code)
+    return _vh_note(history.favorites) if history is not None else _vh_note(None)
 
 
 def _avoid_html(avoid: list[tuple[DayItem, int]], tz: str) -> str:
@@ -1543,6 +1609,21 @@ def _team_lines_table(sels: list[markets.Selection], prefix: str, home: str, awa
     return _mk_table(["Más de"] + [f"{line:g}" for line in lines], rows)
 
 
+def _over_under_note(pred: mm.MatchPrediction) -> str:
+    """Más/menos de 2.5 frente a la casa y, si el modelo se separa OU_EDGE o más, cómo salió eso en la liga."""
+    market = pred.market.get("over25") if pred.market else None
+    if market is None:
+        return ""
+    over_edge = pred.over25 - market
+    side, edge = ("más", over_edge) if over_edge >= 0 else ("menos", -over_edge)
+    text = f"Casa: más de 2.5 {market:.0%} · modelo {pred.over25:.0%}."
+    note = ""
+    if edge >= vh.OU_EDGE:
+        history = _over_under_history(pred.competition)
+        note = _vh_note(history.for_over_under(side) if history is not None else None)
+    return f"<div class='pd-vh'>{_esc(text)}</div>{note}"
+
+
 def _goals_card(pred: mm.MatchPrediction, sels: list[markets.Selection]) -> str:
     base = pred.base_home + pred.base_away
     sub = (f"Esperados {pred.lam_home + pred.lam_away:.1f} ({pred.lam_home:.1f} – {pred.lam_away:.1f})"
@@ -1552,6 +1633,7 @@ def _goals_card(pred: mm.MatchPrediction, sels: list[markets.Selection]) -> str:
     return ("<div class='pd-mk-card'><div class='pd-mk-title'>Goles</div>"
             f"<div class='pd-mk-sub'>{_esc(sub)}</div>"
             f"<div class='pd-mk-label'>Total</div>{_over_under_table(sels, 'Total de goles', markets.GOAL_LINES)}"
+            f"{_over_under_note(pred)}"
             "<div class='pd-mk-label'>Ambos anotan · doble oportunidad</div>"
             + _mk_table(["", "Sí", "No"], [("Ambos anotan", [_find(sels, "Ambos anotan", "Sí"),
                                                              _find(sels, "Ambos anotan", "No")])])
