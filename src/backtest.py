@@ -133,6 +133,21 @@ def espn_odds_rows(preds: pd.DataFrame, code: str) -> tuple[pd.DataFrame, list[s
     return matched, [f"{espn_source.ESPN}/{code}/summary?event=<id>"]
 
 
+def with_espn_over_under(matched: pd.DataFrame, code: str) -> pd.DataFrame:
+    """Completa las cuotas de más/menos 2.5 con las previas de ESPN donde la fuente de cierre no las trae (las
+    ligas extra de football-data, como Argentina o Brasil, solo tienen 1X2). Solo partidos con id de ESPN; una
+    petición por partido la primera vez (con caché)."""
+    missing = matched["odds_over25"].isna() & matched["id"].astype(str).str.startswith("espn:")
+    if not missing.any():
+        return matched
+    espn, _ = espn_odds_rows(matched[missing].drop(columns=["odds_over25", "odds_under25", "odds_source"],
+                                                   errors="ignore"), code)
+    out = matched.copy()
+    out.loc[espn.index, "odds_over25"] = espn["odds_over25"]
+    out.loc[espn.index, "odds_under25"] = espn["odds_under25"]
+    return out
+
+
 def run(model: LeagueModel) -> BacktestResult:
     data, t = model.data, model.trained
     code = data.competition
