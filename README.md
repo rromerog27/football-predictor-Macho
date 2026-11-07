@@ -383,7 +383,9 @@ internacionales, copas nacionales y Japón). Tiene cinco pestañas:
   - **Todos los partidos**, en una tabla ordenable por hora, por liga
     (agrupada) o por favorito. Cada fila muestra los escudos (de ESPN), la
     barra 1X2, Over 2.5 y el pronóstico ("Parejo" si ningún resultado pasa
-    del 45%). Una etiqueta amarilla ("+11 al 1") marca dónde el modelo da 10
+    del 45%), que salen de las cuotas de la casa cuando ya las hay (ver
+    "Pronóstico con las cuotas de la casa") y si no, del modelo propio. Una
+    etiqueta amarilla ("+11 al 1") marca dónde el modelo propio da 10
     o más puntos más que el mercado (≈1 de cada 10 partidos; no es una
     recomendación de apuesta), en rojo con ⚠ si en esa liga apostar ese tipo
     de valor perdía plata (ver **Historial del valor**). Al tocar una fila se
@@ -409,7 +411,10 @@ internacionales, copas nacionales y Japón). Tiene cinco pestañas:
     en tres niveles: **fijos** (90% o más), **intermedios** (80–90%) y
     **arriesgados** (65–80%). Solo entran los que el modelo ve al menos 10
     puntos (15 en los arriesgados) por encima de un partido medio de la
-    competición, uno por partido, familia y nivel, y no se dan picks de un
+    competición, uno por partido, familia y nivel. En goles, si hay cuotas,
+    cada selección vale **lo menos entre la casa y el modelo propio** (el pick
+    sale solo si los dos lo ven; ver "Pronóstico con las cuotas de la casa");
+    los de córners y tarjetas, que salen del modelo propio, no se dan en un
     partido en el que el favorito del modelo y el de la casa no coinciden o
     se separan más de 15 puntos. Cada pick muestra la probabilidad, lo
     normal, la cuota justa y cuánto acertó su nivel en partidos ya jugados;
@@ -822,6 +827,46 @@ entre ellas (equivalía a sumarle a cada liga decenas de partidos contra un
   30 y 100 quedan más lejos del mercado), 1 o 4 partidos de suavizado por
   equipo (1 igual, 4 peor) y estirar además la diferencia local/visitante
   solo en copas (−0.002 y −0.001 de log loss, dentro del ruido).
+
+**Pronóstico con las cuotas de la casa** (noviembre de 2026). En los 9.349
+partidos de validación con cuotas de cierre de 33 competiciones, la casa
+predice mejor que el modelo en casi todas (salvo la liga rusa, LaLiga 2 y
+Chile), y mezclar los dos no la mejora con ningún peso:
+
+| Log loss | Modelo | Casa | Mejor mezcla |
+|---|---|---|---|
+| 1X2 (9.349 partidos) | 1.0035 | **0.9880** | casa sola (peso del modelo 0; elegido en la 1.ª mitad, en la 2.ª: 0.9846 contra 1.0023 del modelo) |
+| Más/menos 2.5 (6.897) | 0.6824 | **0.6756** | casa sola |
+
+Por eso, cuando el partido ya tiene cuotas, el **pronóstico** (1X2 y todos
+los mercados de goles) sale de la casa (`match_model.MARKET_ANCHOR`): su 1X2
+sin margen y los goles esperados que reproducen su 1X2 y su más/menos 2.5
+(`market_lambdas`). Esos goles esperados también predicen mejor que los del
+modelo el resto de los mercados (diferencia de log loss ± error estándar,
+6.897 partidos con más/menos):
+
+| Mercado | Diferencia |
+|---|---|
+| Más de 1.5 / 2.5 / 3.5 | −0.0053 ± 0.0009 / −0.0065 ± 0.0012 / −0.0042 ± 0.0011 |
+| Ambos anotan | −0.0031 ± 0.0009 |
+| Marca el local / el visitante | −0.0042 ± 0.0011 / −0.0060 ± 0.0012 |
+
+El modelo propio sigue en el detalle de cada partido y es el que busca valor
+frente a la casa (con el historial del valor), el de los picks de resultado,
+el de córners y tarjetas y el de los partidos sin cuotas. Para los picks de
+goles por niveles, lo mejor resultó **exigir que coincidan**: cada selección
+vale lo menos entre la casa y el modelo. En los mismos partidos:
+
+| Picks de goles | Fijo (90%+) | Intermedio | Arriesgado | Parlay fija / intermedia / arriesgada (días) |
+|---|---|---|---|---|
+| Solo el modelo | 92.6% (decía 92.7%) | 84.7% | 73.5% | 78% / 57% / 35% |
+| Solo la casa | 94.9% (decía 92.2%) | 85.6% | 75.2% | 86% / 56% / 35% |
+| **Los dos (lo menos)** | **95.8%** (decía 92.2%) | **87.0%** | **78.4%** | **88% / 62% / 45%** |
+
+Salen menos picks (3.616 contra 4.505 del modelo solo) y la probabilidad
+que muestran es prudente: aciertan más de lo que dicen. La matriz de
+marcadores también es ~12 veces más rápida (Poisson con numpy en lugar de
+scipy.stats), lo que acelera el entrenamiento y el historial de los picks.
 
 **Copas nacionales** (octubre de 2026). Se modelan como las internacionales,
 con las ligas de su país (ver "Datos"). El problema eran los equipos

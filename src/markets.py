@@ -13,7 +13,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -97,6 +98,25 @@ def goal_selections(pred: mm.MatchPrediction) -> list[Selection]:
     out.append(Selection(f, "Ganar por 2 o más", pred.away, float(matrix[j - i >= 2].sum()),
                          base_of(lambda m: float(m[j - i >= 2].sum())), f"{pred.away} gana por 2 o más"))
     return out
+
+
+def own_goal_selections(pred: mm.MatchPrediction) -> list[Selection]:
+    """Selecciones de goles según el modelo propio (sus goles esperados y su 1X2), aunque el pronóstico salga de
+    las cuotas de la casa (ver match_model.MARKET_ANCHOR)."""
+    lam_h, lam_a = pred.model_lambdas if pred.model_lambdas is not None else (pred.lam_home, pred.lam_away)
+    own = pred.own
+    return goal_selections(SimpleNamespace(
+        home=pred.home, away=pred.away, lam_home=lam_h, lam_away=lam_a, p_final=own,
+        matrix=mm.reweight_matrix(mm.score_matrix(lam_h, lam_a, pred.trained.rho), own),
+        base_home=pred.base_home, base_away=pred.base_away, trained=pred.trained))
+
+
+def consensus(a: list[Selection], b: list[Selection]) -> list[Selection]:
+    """Las selecciones de `a` con la probabilidad más baja entre `a` y `b` (el pronóstico con las cuotas de la casa y
+    el modelo propio): un pick sale solo si los dos lo ven. En validación, los picks así aciertan más que con
+    cualquiera de los dos solo (ver README)."""
+    other = {(s.market, s.label): s.p for s in b}
+    return [replace(s, p=min(s.p, other.get((s.market, s.label), s.p))) for s in a]
 
 
 def count_selections(fc: cc.CountForecast, home: str, away: str) -> list[Selection]:

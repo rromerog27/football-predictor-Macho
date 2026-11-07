@@ -113,20 +113,44 @@ def selection_hit(sel: markets.Selection, hv: float, av: float, home: str, away:
     raise ValueError(f"Mercado desconocido: {m}")
 
 
-def goal_history(val: pd.DataFrame, rho: float) -> list[MarketPick]:
+def _market_1x2_ou(r) -> tuple[np.ndarray | None, float | None]:
+    """1X2 y más de 2.5 sin margen de las cuotas de una fila (None si no hay)."""
+    odds = np.array([getattr(r, c, np.nan) for c in ("odds_h", "odds_d", "odds_a")], float)
+    if not np.isfinite(odds).all() or (odds <= 1).any():
+        return None, None
+    inv = 1 / odds
+    ou = np.array([getattr(r, c, np.nan) for c in ("odds_over25", "odds_under25")], float)
+    p_over = float((1 / ou[0]) / (1 / ou).sum()) if np.isfinite(ou).all() and (ou > 1).all() else None
+    return inv / inv.sum(), p_over
+
+
+def goal_history(val: pd.DataFrame, rho: float, odds: pd.DataFrame | None = None) -> list[MarketPick]:
     """Picks de goles que la regla habría dado en los partidos de validación, con su resultado. El partido
-    medio usa los goles esperados medios de la propia validación."""
+    medio usa los goles esperados medios de la propia validación. Con `odds` (columnas id, odds_h/d/a y, si hay,
+    odds_over25/odds_under25), en los partidos con cuotas cada selección vale lo mínimo entre el modelo y la casa
+    (1X2 de la casa y goles esperados de sus cuotas), como en la app (`markets.consensus`)."""
     val = val.dropna(subset=["hg", "ag"])
     if val.empty:
         return []
+    cols = ["odds_h", "odds_d", "odds_a", "odds_over25", "odds_under25"]
+    val = val.drop(columns=[c for c in cols if c in val])
+    if odds is not None and len(odds):
+        val = val.merge(odds[["id", *[c for c in cols if c in odds]]].drop_duplicates("id"), on="id", how="left")
     base_h, base_a = float(val["lam_h"].mean()), float(val["lam_a"].mean())
+
+    def selections(lam_h: float, lam_a: float, p: np.ndarray, r) -> list[markets.Selection]:
+        return markets.goal_selections(SimpleNamespace(
+            home=r.home, away=r.away, lam_home=lam_h, lam_away=lam_a, p_final=p,
+            matrix=mm.reweight_matrix(mm.score_matrix(lam_h, lam_a, rho), p), base_home=base_h, base_away=base_a,
+            trained=SimpleNamespace(rho=rho)))
+
     out = []
     for r in val.itertuples(index=False):
-        p = np.array([r.p_model_H, r.p_model_D, r.p_model_A], float)
-        pred = SimpleNamespace(home=r.home, away=r.away, lam_home=r.lam_h, lam_away=r.lam_a, p_final=p,
-                               matrix=mm.reweight_matrix(mm.score_matrix(r.lam_h, r.lam_a, rho), p),
-                               base_home=base_h, base_away=base_a, trained=SimpleNamespace(rho=rho))
-        for tier, sel in match_picks(markets.goal_selections(pred)):
+        sels = selections(r.lam_h, r.lam_a, np.array([r.p_model_H, r.p_model_D, r.p_model_A], float), r)
+        pm, p_over = _market_1x2_ou(r) if mm.MARKET_ANCHOR else (None, None)
+        if pm is not None:
+            sels = markets.consensus(selections(*mm.market_lambdas(pm, p_over, rho), pm, r), sels)
+        for tier, sel in match_picks(sels):
             out.append(MarketPick(str(r.id), r.datetime, r.competition, r.home, r.away, tier, sel,
                                   selection_hit(sel, r.hg, r.ag, r.home, r.away)))
     return out
