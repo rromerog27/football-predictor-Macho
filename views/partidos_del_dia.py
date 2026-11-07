@@ -586,7 +586,7 @@ def _market_html(pred: mm.MatchPrediction) -> str:
     if not pred.market:
         return ""
     pm = pred.market["p_1x2"]
-    diff = pred.p_final - pm
+    diff = pred.own - pm
     best = int(diff.argmax())
     chip = note = ""
     if diff[best] >= VALUE_THRESHOLD:
@@ -613,7 +613,7 @@ def _lineup_html(pred: mm.MatchPrediction) -> str:
     lu = pred.lineups
     if lu is None:
         return ""
-    delta = (pred.p_final - pred.p_before_lineups) * 100
+    delta = (pred.own - pred.p_before_lineups) * 100
     moved = "sin cambio"
     if abs(delta[0]) >= 0.5 or abs(delta[2]) >= 0.5:
         moved = f"local {delta[0]:+.0f} pts · visitante {delta[2]:+.0f} pts"
@@ -675,8 +675,8 @@ def _model_table_html(pred: mm.MatchPrediction) -> str:
     def row(name: str, probs) -> str:
         return f"<tr><td>{name}</td>" + "".join(f"<td>{p * 100:.1f}%</td>" for p in probs) + "</tr>"
 
-    market_row = row("Mercado", pred.market["p_1x2"]) if pred.market else ""
-    lineup_row = row("Con alineaciones", pred.p_final) if pred.lineups is not None else ""
+    market_row = row("Casa · pronóstico" if pred.anchored else "Mercado", pred.market["p_1x2"]) if pred.market else ""
+    lineup_row = row("Con alineaciones", pred.own) if pred.lineups is not None else ""
     calibrated = max(abs(pred.p_model - pred.p_poisson)) >= 0.005
     poisson_row = row("Poisson sin calibrar", pred.p_poisson) if calibrated else ""
     return ("<table><tr><th>Modelo</th><th>1</th><th>X</th><th>2</th></tr>"
@@ -812,7 +812,7 @@ def _value_edge(pred: mm.MatchPrediction) -> tuple[int, float] | None:
     """(resultado, puntos) donde el modelo más supera al mercado, si hay cuotas."""
     if not pred.market:
         return None
-    diff = pred.p_final - pred.market["p_1x2"]
+    diff = pred.own - pred.market["p_1x2"]
     best = int(diff.argmax())
     return best, float(diff[best])
 
@@ -922,11 +922,11 @@ def _highlight_items(items: list[DayItem], kind: str) -> list[tuple[DayItem, str
             if rec is not None:
                 history = f" · {'⚠ ' if rec.verdict == 'en contra' else ''}en esta liga {rec.short}"
             out.append((it, f"+{d * 100:.0f}", f"pts al {('1', 'X', '2')[k]} ({_outcome_label(it.pred, k)})",
-                        f"Modelo {_pct(it.pred.p_final[k])} · mercado {_pct(pm)}{history}"))
+                        f"Modelo {_pct(it.pred.own[k])} · mercado {_pct(pm)}{history}"))
     elif kind == "XI confirmados":
         with_xi = [it for it in preds if it.pred.lineups is not None]
         for it in sorted(with_xi, key=lambda it: -abs(it.pred.lineups.shift))[:N_HIGHLIGHTS]:
-            lu, p0, p1 = it.pred.lineups, it.pred.p_before_lineups, it.pred.p_final
+            lu, p0, p1 = it.pred.lineups, it.pred.p_before_lineups, it.pred.own
             k = int(abs(p1 - p0).argmax())
             out.append((it, f"{(p1[k] - p0[k]) * 100:+.0f}", f"pts al {('1', 'X', '2')[k]} por las alineaciones",
                         f"{it.pred.home}: {_rotation_text(lu.home)} · {it.pred.away}: {_rotation_text(lu.away)}"))
@@ -1141,6 +1141,11 @@ def section_today(tz: str) -> None:
 
     with st.expander("Cómo funciona y limitaciones"):
         st.markdown(
+            "- **Pronóstico:** cuando la casa ya publicó cuotas, el 1X2 y los mercados de goles salen de ellas (1X2 "
+            "sin margen y los goles esperados que implican el 1X2 y el más/menos 2.5): en 9.349 partidos ya jugados "
+            "predicen mejor que el modelo (log loss 0.988 contra 1.004) y ninguna mezcla de los dos mejora a la casa "
+            "sola. El modelo propio queda en el detalle de cada partido y es el que busca **valor** frente a la casa "
+            "(con su historial en la liga) y el que pronostica los partidos sin cuotas.\n"
             "- **Datos:** xG partido a partido de [Understat](https://understat.com) en Premier League, LaLiga, "
             "Bundesliga, Serie A, Ligue 1 y la liga rusa. En el resto, resultados y tiros de ESPN con un **xG "
             "aproximado** (0.23 por tiro a puerta + 0.065 por tiro fuera, calibrado con el xG de Understat); en "
@@ -1234,7 +1239,7 @@ def _avoid_html(avoid: list[tuple[DayItem, int]], tz: str) -> str:
             f"{_esc(comps.BY_CODE[it.code].name)}</span>"
             f"<span class='pd-hist-match'>{_esc(it.row['home'])} – {_esc(it.row['away'])}</span>"
             f"<span class='pd-hist-pick'><span class='pd-pill'>{_esc(_pick_what(k, pred.home, pred.away))}: mercado "
-            f"{pm:.0%} · modelo {pred.p_final[k]:.0%}</span></span>"
+            f"{pm:.0%} · modelo {pred.own[k]:.0%}</span></span>"
             f"<span class='pd-hist-res'><span class='pd-pill miss'>Evitar</span></span></div>")
     return f"<div class='pd-hist'>{''.join(rows)}</div>"
 
@@ -1262,11 +1267,13 @@ def section_picks(tz: str) -> None:
                 f"<b>No es una recomendación de apuesta:</b> en el backtest ({n_bt} picks) ganaron el {won_bt:.0%}, "
                 f"pero a cuota de cierre quedaron en empate (ROI {roi_bt:+.1%}). Revisá las alineaciones ~1 h antes.")
     elif kind == "Otros mercados":
-        note = ("<b>Picks de goles, córners y tarjetas</b> en tres niveles: <b>fijos</b> (90% o más), <b>intermedios</b> "
-                "(80–90%) y <b>arriesgados</b> (65–80%, con 15 puntos sobre lo normal). Solo entran los que el modelo ve "
-                "al menos 10 puntos por encima de un partido medio de la competición, uno por partido, familia y nivel. "
-                "Se dejan afuera los partidos en que el modelo se separa de la casa en quién es favorito. "
-                "<b>No es una recomendación de apuesta.</b>")
+        note = ("<b>Picks de goles, córners y tarjetas</b> en tres niveles: <b>fijos</b> (90% o más), "
+                "<b>intermedios</b> (80–90%) y <b>arriesgados</b> (65–80%, con 15 puntos sobre lo normal). Solo entran "
+                "los que se ven al menos 10 puntos por encima de un partido medio de la competición, uno por partido, "
+                "familia y nivel. En goles, cuando hay cuotas, cada pick vale lo menos entre la casa y el modelo "
+                "propio: sale solo si los dos lo ven (así aciertan más que con cualquiera de los dos solo). Córners y "
+                "tarjetas salen del modelo propio: se dejan afuera en los partidos en que se separa de la casa en "
+                "quién es favorito. <b>No es una recomendación de apuesta.</b>")
     else:
         note = ("<b>Parlays del día</b> armados con los picks de goles, córners y tarjetas: una pata por partido, las más "
                 "probables de cada nivel. La probabilidad del parlay es el producto de las patas. Abajo, cuántas veces "
@@ -1295,10 +1302,10 @@ def _picks_result(ctx: DayContext, tz: str) -> None:
             continue
         odds = np.array([pd.to_numeric(it.row.get(c), errors="coerce") for c in ("odds_h", "odds_d", "odds_a")], float)
         pm = np.asarray(pred.market["p_1x2"], float)
-        pk = perf.find_pick(pred.p_final, pm, odds)
+        pk = perf.find_pick(pred.own, pm, odds)
         if pk is not None:
             picks.append((it, pk))
-        k = perf.find_avoid(pred.p_final, pm)
+        k = perf.find_avoid(pred.own, pm)
         if k is not None:
             avoid.append((it, k))
     _day_summary(ctx, tz, f" · {no_odds} sin cuotas" if no_odds else "")
@@ -1352,7 +1359,11 @@ def _market_history(code: str) -> list[mp.MarketPick]:
     model = _competition_model(code)
     val = model.trained.val_predictions
     focus = val[val["competition"] == code]
-    picks = mp.goal_history(focus if len(focus) >= 30 else val, model.trained.rho)
+    try:  # los partidos con cuotas se pronostican como hoy: con las de la casa
+        odds = backtest.with_espn_over_under(_backtest(code).matched, code)
+    except Exception:  # noqa: BLE001 — sin cuotas pasadas: el historial del modelo propio
+        odds = None
+    picks = mp.goal_history(focus if len(focus) >= 30 else val, model.trained.rho, odds)
     for count_model in _count_models_or_none(code).values():
         picks += mp.count_history(count_model)
     return picks
@@ -1391,11 +1402,17 @@ def _day_market_picks(ctx: DayContext) -> tuple[list[mp.MarketPick], int]:
         pred = it.pred
         if pred is None or not _matches_query(it.row, ctx.query):
             continue
-        if pred.market and mp.market_disagrees(pred.p_final, np.asarray(pred.market["p_1x2"], float)):
+        disagree = bool(pred.market) and mp.market_disagrees(pred.own, np.asarray(pred.market["p_1x2"], float))
+        if disagree and not pred.anchored:
             skipped += 1
             continue
         groups, forecasts = _match_markets(it.code, pred)
+        if pred.anchored:  # un pick de goles sale solo si la casa y el modelo propio lo ven (lo mínimo de los dos)
+            groups = {**groups, "Goles": markets.consensus(groups["Goles"], markets.own_goal_selections(pred))}
         low = {fc.label for fc in forecasts.values() if fc.low_data}
+        if disagree:  # córners y tarjetas salen del modelo propio, que se separa de la casa
+            low |= set(groups) - {"Goles"}
+            skipped += 1
         sels = [s for fam, group in groups.items() if fam not in low for s in group]
         for tier, sel in mp.match_picks(sels):
             actual = _actual(it, sel.family)
@@ -1433,7 +1450,8 @@ def _market_pick_cards(picks: list[mp.MarketPick], items: dict[str, DayItem], hi
             f"<div class='pd-hl-teams'>{teams}</div>"
             f"<div class='pd-pick-what' title='{_esc(pk.sel.text)}'>{_esc(pk.sel.text)}</div>"
             "<div class='pd-pick-grid'>"
-            f"<div><span>Modelo</span><b>{pk.sel.p:.0%}</b></div>"
+            f"<div><span title='Con cuotas, lo menos entre la casa y el modelo propio'>Probabilidad</span>"
+            f"<b>{pk.sel.p:.0%}</b></div>"
             f"<div><span title='En un partido medio de la competición'>Normal</span><b>{pk.sel.base:.0%}</b></div>"
             f"<div><span>Cuota justa</span><b>{pk.sel.fair_odds:.2f}</b></div>"
             f"<div><span title='{_esc(rate_title)}'>Histórico</span><b>{rate_html}</b></div>"
@@ -1467,8 +1485,8 @@ def _picks_markets(ctx: DayContext, tz: str) -> None:
     hist = mp.summary(history)
     counts = {t: sum(p.tier == t for p in picks) for t in mp.TIER_NAMES}
     _day_summary(ctx, tz, f" · {sum(counts.values())} picks" + (
-        f" · {skipped} partido{'s' if skipped != 1 else ''} sin picks porque el modelo se separa de la casa"
-        if skipped else ""))
+        f" · {skipped} partido{'s' if skipped != 1 else ''} sin picks de córners ni tarjetas porque el modelo se "
+        "separa de la casa" if skipped else ""))
     items = {it.key: it for it in ctx.items}
     notes = {"Fijo": "90% o más", "Intermedio": "80–90%", "Arriesgado": "65–80%"}
     for tier in mp.TIER_NAMES:
@@ -1509,7 +1527,7 @@ def _parlay_html(parlay: mp.Parlay, sim: pd.DataFrame, tz: str) -> str:
     return (f"<div class='pd-parlay'><div class='pd-parlay-head'><b>{_esc(parlay.name)}</b>"
             f"<span>{len(parlay.legs)} patas{status}</span></div>{legs}"
             "<div class='pd-parlay-foot'>"
-            f"<div><span>Modelo</span><b>{parlay.p:.0%}</b></div>"
+            f"<div><span title='Producto de las patas'>Probabilidad</span><b>{parlay.p:.0%}</b></div>"
             f"<div><span>Cuota justa</span><b>{parlay.fair_odds:.2f}</b></div>"
             f"<div><span title='{_esc(hist_title)}'>Histórico</span><b>{hist_html}</b></div></div></div>")
 
@@ -1521,7 +1539,8 @@ def _picks_parlays(ctx: DayContext, tz: str) -> None:
     sim = mp.simulate_parlays(_histories(codes))
     parlays = mp.build_parlays(picks)
     _day_summary(ctx, tz, f" · {len(picks)} picks para armar" + (
-        f" · {skipped} partido{'s' if skipped != 1 else ''} afuera por separarse de la casa" if skipped else ""))
+        f" · {skipped} partido{'s' if skipped != 1 else ''} sin córners ni tarjetas por separarse de la casa"
+        if skipped else ""))
     if not parlays:
         st.markdown("<div class='pd-empty'>No hay picks suficientes para armar parlays en este día (cada parlay necesita "
                     "al menos 2 partidos distintos del mismo nivel).</div>", unsafe_allow_html=True)
@@ -1720,8 +1739,9 @@ def _competition_checks(code: str) -> list[list[markets.Check]]:
 
 def section_markets(tz: str) -> None:
     st.markdown(
-        "<div class='pd-note'>Probabilidad del modelo para cada mercado y su <b>cuota justa</b> (1 ÷ probabilidad): "
-        "si tu casa paga más que eso, el modelo ve valor. Pasá el mouse (o tocá) una celda para ver lo que pasa en "
+        "<div class='pd-note'>Probabilidad de cada mercado y su <b>cuota justa</b> (1 ÷ probabilidad). Los goles "
+        "salen de las cuotas de la casa cuando las hay (predicen mejor que el modelo) y si no, del modelo propio. "
+        "Pasá el mouse (o tocá) una celda para ver lo que pasa en "
         "un partido medio de la competición. Córners y tarjetas salen de un modelo aparte por equipo con datos de "
         "ESPN: aciertan bien quién saca más córners y poco más que la media de la liga en los totales. "
         "<b>No es una recomendación de apuesta.</b></div>", unsafe_allow_html=True)
@@ -2164,8 +2184,8 @@ default_tz = browser_tz if browser_tz else "UTC"
 
 st.markdown(
     "<div class='pd-head'><div class='pd-title'>Partidos del día</div>"
-    f"<div class='pd-sub'>Pronósticos del modelo para {len(comps.COMPETITIONS)} ligas y copas, comparados con el "
-    "mercado</div></div>",
+    f"<div class='pd-sub'>Pronósticos de {len(comps.COMPETITIONS)} ligas y copas: las cuotas de la casa y un modelo "
+    "propio que busca valor</div></div>",
     unsafe_allow_html=True)
 
 with st.sidebar:

@@ -82,7 +82,7 @@ def lineup_lines(pred: mm.MatchPrediction) -> list[str]:
             missing = ", ".join(team.missing) if team.missing else "ninguno"
             out.append(f"- {name}: rotación {team.rotation:.0%} (habituales de sus últimos {team.n_previous} partidos "
                        f"que no son titulares: {missing})")
-    before, after = pred.p_before_lineups, pred.p_final
+    before, after = pred.p_before_lineups, pred.own
     out.append(f"- Ajuste del 1X2: Local {pct(before[0])} → {pct(after[0])} | Empate {pct(before[1])} → "
                f"{pct(after[1])} | Visitante {pct(before[2])} → {pct(after[2])}")
     return out
@@ -152,7 +152,9 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool, counts: 
            if t.ll_model_focus is not None else ""),
         *lineup_lines(pred),
         SEP,
-        "🎯 PREDICCIÓN FINAL" + (" (con el ajuste por alineaciones)" if pred.lineups is not None else ""),
+        "🎯 PREDICCIÓN FINAL" + (" (1X2 y goles de las cuotas de la casa, que predicen mejor que el modelo)"
+                                  if pred.anchored else
+                                  " (con el ajuste por alineaciones)" if pred.lineups is not None else ""),
         f"- Mercado 1X2: Local {pct(pred.p_final[0])} | Empate {pct(pred.p_final[1])} | "
         f"Visitante {pct(pred.p_final[2])}",
         f"- Línea de Goles: Over 2.5 {pct(pred.over25)} | Under 2.5 {pct(1 - pred.over25)}",
@@ -160,7 +162,7 @@ def report(pred: mm.MatchPrediction, data: mm.LeagueData, detail: bool, counts: 
     ]
     if pred.market:
         pm = pred.market["p_1x2"]
-        diff = pred.p_final - pm
+        diff = pred.own - pm
         out += [
             SEP,
             "💱 MERCADO (cuotas DraftKings vía ESPN, sin margen de la casa)",
